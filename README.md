@@ -64,6 +64,15 @@ Override helper paths if they are not on `PATH`:
   --wit /path/to/wit
 ```
 
+## GitHub Actions Releases
+
+An Ubuntu release workflow lives at `.github/workflows/release.yml`.
+
+- Pull requests and pushes to `main` build and validate the bundled Linux release artifact.
+- Tags matching `v*` also publish `dist/wii-rip-linux-x86_64.tar.gz` to the GitHub Release.
+
+The workflow installs Ubuntu's `wit` package and source-builds `dolphin-tool` from the pinned Dolphin ref in the workflow before calling `./packaging/build_release.sh`.
+
 ## Usage
 
 ```bash
