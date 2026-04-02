@@ -26,3 +26,4 @@ build/
 .env.test.local
 .env.production.local
 .ruff_cache/
+*.pyc
