@@ -1,0 +1,9 @@
+[package]
+name = "wii-rip"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+lexopt = "0.3"
+tempfile = "3.23"
