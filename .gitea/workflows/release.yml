@@ -1,0 +1,113 @@
+name: release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - v*
+  workflow_dispatch:
+
+env:
+  PACKAGE_NAME: wii-rip-linux-x86_64
+  DOLPHIN_REF: 2603a
+
+jobs:
+  ubuntu-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          "$HOME/.cargo/bin/rustup" component add clippy
+          printf '%s/bin\n' "$HOME/.cargo" >> "$GITHUB_PATH"
+
+      - name: Install Ubuntu build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            curl \
+            gettext \
+            jq \
+            ninja-build \
+            pkg-config \
+            wit
+
+      - name: Build dolphin-tool helper
+        run: |
+          ./packaging/build_dolphin_tool.sh \
+            --ref "$DOLPHIN_REF" \
+            --output "$RUNNER_TEMP/dolphin-tool"
+
+      - name: Run linters
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Package bundled release
+        run: |
+          ./packaging/build_release.sh \
+            --name "$PACKAGE_NAME" \
+            --tar \
+            --dolphin-tool "$RUNNER_TEMP/dolphin-tool" \
+            --wit "$(command -v wit)"
+
+      - name: Show packaged artifact
+        run: ls -lh "dist/$PACKAGE_NAME.tar.gz"
+
+      - name: Publish Gitea release assets
+        if: startsWith(gitea.ref, 'refs/tags/v')
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [[ -z "${RELEASE_TOKEN:-}" ]]; then
+            printf 'RELEASE_TOKEN secret is required to publish tag releases.\n' >&2
+            exit 1
+          fi
+
+          repo="${GITHUB_REPOSITORY:-${GITEA_REPOSITORY:-}}"
+          tag="${GITHUB_REF_NAME:-${GITEA_REF_NAME:-${GITEA_REF##refs/tags/}}}"
+          api_root="${GITEA_SERVER_URL%/}/api/v1"
+          asset_path="dist/$PACKAGE_NAME.tar.gz"
+          asset_name="$(basename "$asset_path")"
+
+          release_endpoint="$api_root/repos/$repo/releases/tags/$tag"
+          release_id="$({ curl --silent --show-error --fail \
+            -H "Authorization: token $RELEASE_TOKEN" \
+            "$release_endpoint" || true; } | jq -r '.id // empty')"
+
+          if [[ -z "$release_id" ]]; then
+            release_id="$(curl --silent --show-error --fail \
+              -X POST \
+              -H "Authorization: token $RELEASE_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"tag_name\":\"$tag\",\"name\":\"$tag\"}" \
+              "$api_root/repos/$repo/releases" | jq -r '.id')"
+          fi
+
+          existing_asset_id="$({ curl --silent --show-error --fail \
+            -H "Authorization: token $RELEASE_TOKEN" \
+            "$api_root/repos/$repo/releases/$release_id/assets" || true; } \
+            | jq -r ".[] | select(.name == \"$asset_name\") | .id")"
+
+          if [[ -n "$existing_asset_id" ]]; then
+            curl --silent --show-error --fail \
+              -X DELETE \
+              -H "Authorization: token $RELEASE_TOKEN" \
+              "$api_root/repos/$repo/releases/$release_id/assets/$existing_asset_id"
+          fi
+
+          curl --silent --show-error --fail \
+            -X POST \
+            -H "Authorization: token $RELEASE_TOKEN" \
+            -H "Content-Type: application/gzip" \
+            --data-binary "@$asset_path" \
+            "$api_root/repos/$repo/releases/$release_id/assets?name=$asset_name"

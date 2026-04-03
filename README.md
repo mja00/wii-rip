@@ -73,6 +73,15 @@ An Ubuntu release workflow lives at `.github/workflows/release.yml`.
 
 The workflow installs Ubuntu's `wit` package and source-builds `dolphin-tool` from the pinned Dolphin ref in the workflow before calling `./packaging/build_release.sh`.
 
+## Gitea Actions Releases
+
+A matching Gitea workflow lives at `.gitea/workflows/release.yml`.
+
+- Pull requests and pushes to `main` run the same Ubuntu build, lint, test, and package flow.
+- Tags matching `v*` publish `dist/wii-rip-linux-x86_64.tar.gz` to the matching Gitea release.
+
+The Gitea workflow expects a repository secret named `RELEASE_TOKEN` with permission to create releases and upload release assets.
+
 ## Usage
 
 ```bash
