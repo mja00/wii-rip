@@ -9,6 +9,7 @@ output_path="$repo_root/build/dolphin-tool/dolphin-tool"
 repo_url="https://github.com/dolphin-emu/dolphin.git"
 ref="master"
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+skip_if_present=0
 
 usage() {
   cat <<'EOF'
@@ -24,6 +25,7 @@ Options:
   --build-dir <dir>       CMake build directory (default: ./build/dolphin-tool/build)
   --output <path>         Final dolphin-tool path (default: ./build/dolphin-tool/dolphin-tool)
   --jobs <count>          Parallel build jobs (default: detected CPU count)
+  --skip-if-present       Reuse an existing executable at --output if available
   -h, --help              Show this help text
 EOF
 }
@@ -65,6 +67,10 @@ while (($# > 0)); do
       jobs="$2"
       shift 2
       ;;
+    --skip-if-present)
+      skip_if_present=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -74,6 +80,12 @@ while (($# > 0)); do
       ;;
   esac
 done
+
+if ((skip_if_present == 1)) && [[ -x "$output_path" ]]; then
+  printf 'Using cached dolphin-tool:\n'
+  printf '  output: %s\n' "$output_path"
+  exit 0
+fi
 
 rm -rf "$source_dir" "$build_dir"
 mkdir -p "$(dirname -- "$output_path")"

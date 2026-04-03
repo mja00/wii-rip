@@ -72,6 +72,7 @@ An Ubuntu release workflow lives at `.github/workflows/release.yml`.
 - Tags matching `v*` also publish `dist/wii-rip-linux-x86_64.tar.gz` to the GitHub Release.
 
 The workflow installs Ubuntu's `wit` package and source-builds `dolphin-tool` from the pinned Dolphin ref in the workflow before calling `./packaging/build_release.sh`.
+It caches the built `dolphin-tool` binary on a monthly key, so the helper is usually rebuilt only once per month per pinned Dolphin ref.
 
 ## Gitea Actions Releases
 
@@ -81,6 +82,7 @@ A matching Gitea workflow lives at `.gitea/workflows/release.yml`.
 - Tags matching `v*` publish `dist/wii-rip-linux-x86_64.tar.gz` to the matching Gitea release.
 
 The Gitea workflow expects a repository secret named `RELEASE_TOKEN` with permission to create releases and upload release assets.
+Like the GitHub workflow, it restores a monthly `dolphin-tool` cache before falling back to a source build.
 
 ## Usage
 

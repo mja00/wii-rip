@@ -15,6 +15,7 @@ permissions:
 env:
   PACKAGE_NAME: wii-rip-linux-x86_64
   DOLPHIN_REF: 2603a
+  DOLPHIN_TOOL_PATH: build/dolphin-tool-cache/dolphin-tool
 
 jobs:
   ubuntu-release:
@@ -32,6 +33,15 @@ jobs:
       - name: Restore Cargo cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Set dolphin-tool cache period
+        run: echo "DOLPHIN_CACHE_PERIOD=$(date -u +%Y-%m)" >> "$GITHUB_ENV"
+
+      - name: Restore dolphin-tool cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DOLPHIN_TOOL_PATH }}
+          key: dolphin-tool-${{ runner.os }}-${{ env.DOLPHIN_REF }}-${{ env.DOLPHIN_CACHE_PERIOD }}
+
       - name: Install Ubuntu build dependencies
         run: |
           sudo apt-get update
@@ -47,7 +57,8 @@ jobs:
         run: |
           ./packaging/build_dolphin_tool.sh \
             --ref "$DOLPHIN_REF" \
-            --output "$RUNNER_TEMP/dolphin-tool"
+            --output "$DOLPHIN_TOOL_PATH" \
+            --skip-if-present
 
       - name: Run linters
         run: cargo clippy --all-targets -- -D warnings
@@ -60,7 +71,7 @@ jobs:
           ./packaging/build_release.sh \
             --name "$PACKAGE_NAME" \
             --tar \
-            --dolphin-tool "$RUNNER_TEMP/dolphin-tool" \
+            --dolphin-tool "$DOLPHIN_TOOL_PATH" \
             --wit "$(command -v wit)"
 
       - name: Upload release artifact
