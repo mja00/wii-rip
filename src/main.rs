@@ -11,15 +11,19 @@ use anyhow::{Context, Result, bail};
 use lexopt::prelude::*;
 use tempfile::TempDir;
 
-const TOOL_ENV_OVERRIDES: [(&str, &str); 2] = [
+const TOOL_ENV_OVERRIDES: [(&str, &str); 4] = [
     ("dolphin-tool", "WII_RIP_DOLPHIN_TOOL"),
     ("wit", "WII_RIP_WIT"),
+    ("wii-banner-render", "WII_RIP_BANNER_RENDER"),
+    ("ffmpeg", "WII_RIP_FFMPEG"),
 ];
 
 struct Args {
     input: PathBuf,
     output: PathBuf,
     keep_temp: bool,
+    video: bool,
+    video_only: bool,
 }
 
 fn main() {
@@ -35,9 +39,13 @@ fn run() -> Result<()> {
         bail!("input file not found: {}", args.input.display());
     }
 
-    let output_path = rip(&args.input, &args.output, args.keep_temp)?;
-    println!("\nOutput: {}", output_path.display());
-    Ok(())
+    rip(
+        &args.input,
+        &args.output,
+        args.keep_temp,
+        args.video,
+        args.video_only,
+    )
 }
 
 fn parse_args() -> Result<Args> {
@@ -45,6 +53,8 @@ fn parse_args() -> Result<Args> {
     let mut input = None;
     let mut output = PathBuf::from("output");
     let mut keep_temp = false;
+    let mut video = false;
+    let mut video_only = false;
 
     while let Some(argument) = parser.next()? {
         match argument {
@@ -53,6 +63,12 @@ fn parse_args() -> Result<Args> {
             }
             Long("keep-temp") => {
                 keep_temp = true;
+            }
+            Long("video") => {
+                video = true;
+            }
+            Long("video-only") => {
+                video_only = true;
             }
             Short('h') | Long("help") => {
                 print_help();
@@ -76,16 +92,24 @@ fn parse_args() -> Result<Args> {
         input,
         output,
         keep_temp,
+        video,
+        video_only,
     })
 }
 
 fn print_help() {
     println!(
-        "wii-rip\n\nExtract Wii disc channel music from .rvz, .iso, and .wbfs images into a PCM WAV file.\n\nUSAGE:\n    wii-rip <input> [OPTIONS]\n\nOPTIONS:\n    -o, --output <dir>   Output directory (default: ./output)\n        --keep-temp      Save extracted sound.bin alongside the WAV\n    -h, --help           Show this help text\n"
+        "wii-rip\n\nExtract Wii disc channel audio and/or banner animation from .rvz, .iso, and .wbfs images.\n\nUSAGE:\n    wii-rip <input> [OPTIONS]\n\nOPTIONS:\n    -o, --output <dir>   Output directory (default: ./output)\n        --keep-temp      Save extracted sound.bin alongside the WAV\n        --video          Also render the banner animation to an MP4\n        --video-only     Render banner animation only; skip audio extraction\n    -h, --help           Show this help text\n\nEXTERNAL TOOLS:\n    dolphin-tool         Required for .rvz input (override: $WII_RIP_DOLPHIN_TOOL)\n    wit                  Required for disc image extraction (override: $WII_RIP_WIT)\n    wii-banner-render    Required for --video / --video-only (override: $WII_RIP_BANNER_RENDER)\n    ffmpeg               Optional; muxes audio + video into a single file (override: $WII_RIP_FFMPEG)\n"
     );
 }
 
-fn rip(input_path: &Path, output_dir: &Path, keep_temp: bool) -> Result<PathBuf> {
+fn rip(
+    input_path: &Path,
+    output_dir: &Path,
+    keep_temp: bool,
+    video: bool,
+    video_only: bool,
+) -> Result<()> {
     let suffix = input_path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -115,38 +139,85 @@ fn rip(input_path: &Path, output_dir: &Path, keep_temp: bool) -> Result<PathBuf>
     let extract_dir = temp_path.join("extracted");
     let bnr_path = extract_opening_bnr(&iso_path, &extract_dir)?;
 
-    println!("Parsing opening.bnr...");
-    let bnr_data =
-        fs::read(&bnr_path).with_context(|| format!("failed to read {}", bnr_path.display()))?;
-    let sound_bin = bnr::extract_sound_bin(&bnr_data).context("failed to parse opening.bnr")?;
-    println!(
-        "  Extracted sound.bin ({} bytes, format: {})",
-        sound_bin.len(),
-        magic_label(&sound_bin)
-    );
-
-    if keep_temp {
-        let kept_path = output_dir.join("sound.bin");
-        fs::write(&kept_path, &sound_bin)
-            .with_context(|| format!("failed to write {}", kept_path.display()))?;
-        println!("  Saved sound.bin to: {}", kept_path.display());
-    }
-
-    println!("Decoding audio...");
     let stem = input_path
         .file_stem()
-        .context("input path does not have a valid file stem")?;
-    let wav_path = output_dir.join(format!("{}_disc_channel.wav", stem.to_string_lossy()));
-    let (sample_rate, channels, num_samples) =
-        bns::decode_bns_to_wav(&sound_bin, &wav_path).context("failed to decode audio")?;
+        .context("input path does not have a valid file stem")?
+        .to_string_lossy()
+        .into_owned();
 
-    let duration = num_samples as f64 / f64::from(sample_rate);
-    println!(
-        "  {}ch, {} Hz, {} samples ({duration:.1}s)",
-        channels, sample_rate, num_samples
-    );
+    let wav_path = if !video_only {
+        println!("Parsing opening.bnr...");
+        let bnr_data = fs::read(&bnr_path)
+            .with_context(|| format!("failed to read {}", bnr_path.display()))?;
+        let sound_bin = bnr::extract_sound_bin(&bnr_data).context("failed to parse opening.bnr")?;
+        println!(
+            "  Extracted sound.bin ({} bytes, format: {})",
+            sound_bin.len(),
+            magic_label(&sound_bin)
+        );
 
-    Ok(wav_path)
+        if keep_temp {
+            let kept_path = output_dir.join("sound.bin");
+            fs::write(&kept_path, &sound_bin)
+                .with_context(|| format!("failed to write {}", kept_path.display()))?;
+            println!("  Saved sound.bin to: {}", kept_path.display());
+        }
+
+        println!("Decoding audio...");
+        let wav_path = output_dir.join(format!("{stem}_disc_channel.wav"));
+        let (sample_rate, channels, num_samples) =
+            bns::decode_bns_to_wav(&sound_bin, &wav_path).context("failed to decode audio")?;
+
+        let duration = num_samples as f64 / f64::from(sample_rate);
+        println!(
+            "  {}ch, {} Hz, {} samples ({duration:.1}s)",
+            channels, sample_rate, num_samples
+        );
+
+        Some(wav_path)
+    } else {
+        None
+    };
+
+    let banner_path = if video || video_only {
+        println!("Rendering banner animation...");
+        let banner_video_path = output_dir.join(format!("{stem}_disc_channel_banner.mp4"));
+        render_banner(&bnr_path, &banner_video_path)?;
+        Some(banner_video_path)
+    } else {
+        None
+    };
+
+    match (&wav_path, &banner_path) {
+        (Some(wav), Some(banner)) => match try_find_tool("ffmpeg")? {
+            Some(ffmpeg) => {
+                println!("Muxing audio + video...");
+                let muxed_path = output_dir.join(format!("{stem}_disc_channel.mp4"));
+                mux_audio_video(&ffmpeg, wav, banner, &muxed_path)?;
+                println!("\nOutput: {}", muxed_path.display());
+            }
+            None => {
+                println!("\nffmpeg not found; audio and video saved as separate files.");
+                println!(
+                    "  To mux manually: ffmpeg -i \"{}\" -i \"{}\" -c:v copy -c:a aac -shortest -y <output.mp4>",
+                    banner.display(),
+                    wav.display()
+                );
+                println!("\nOutputs:");
+                println!("  {}", wav.display());
+                println!("  {}", banner.display());
+            }
+        },
+        (Some(wav), None) => {
+            println!("\nOutput: {}", wav.display());
+        }
+        (None, Some(banner)) => {
+            println!("\nOutput: {}", banner.display());
+        }
+        (None, None) => unreachable!("audio and video both skipped"),
+    }
+
+    Ok(())
 }
 
 fn rvz_to_iso(rvz_path: &Path, iso_path: &Path) -> Result<()> {
@@ -221,6 +292,72 @@ fn extract_opening_bnr(image_path: &Path, extract_dir: &Path) -> Result<PathBuf>
     Ok(bnr_path)
 }
 
+fn render_banner(bnr_path: &Path, output_path: &Path) -> Result<()> {
+    let renderer = check_tool("wii-banner-render")?;
+    let output = Command::new(&renderer)
+        .args([
+            bnr_path.to_str().context(
+                "opening.bnr path contains non-UTF-8 data unsupported by wii-banner-render invocation",
+            )?,
+            "-o",
+            output_path.to_str().context(
+                "output path contains non-UTF-8 data unsupported by wii-banner-render invocation",
+            )?,
+        ])
+        .output()
+        .with_context(|| format!("failed to run {}", renderer.display()))?;
+
+    if !output.status.success() {
+        bail!(
+            "wii-banner-render failed:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    println!("  Banner video written to: {}", output_path.display());
+    Ok(())
+}
+
+fn mux_audio_video(
+    ffmpeg: &Path,
+    wav_path: &Path,
+    video_path: &Path,
+    output_path: &Path,
+) -> Result<()> {
+    let output = Command::new(ffmpeg)
+        .args([
+            "-i",
+            video_path
+                .to_str()
+                .context("video path contains non-UTF-8 data")?,
+            "-i",
+            wav_path
+                .to_str()
+                .context("audio path contains non-UTF-8 data")?,
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-y",
+            output_path
+                .to_str()
+                .context("output path contains non-UTF-8 data")?,
+        ])
+        .output()
+        .with_context(|| format!("failed to run {}", ffmpeg.display()))?;
+
+    if !output.status.success() {
+        bail!(
+            "ffmpeg failed:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    println!("  Muxed output written to: {}", output_path.display());
+    Ok(())
+}
+
 fn check_tool(name: &str) -> Result<PathBuf> {
     let candidates = tool_candidates(name)?;
     for candidate in &candidates {
@@ -230,6 +367,16 @@ fn check_tool(name: &str) -> Result<PathBuf> {
     }
 
     bail!(missing_tool_message(name, &candidates)?);
+}
+
+fn try_find_tool(name: &str) -> Result<Option<PathBuf>> {
+    let candidates = tool_candidates(name)?;
+    for candidate in &candidates {
+        if is_executable(candidate)? {
+            return Ok(Some(candidate.clone()));
+        }
+    }
+    Ok(None)
 }
 
 fn tool_candidates(name: &str) -> Result<Vec<PathBuf>> {

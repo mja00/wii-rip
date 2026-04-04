@@ -16,6 +16,7 @@ env:
   PACKAGE_NAME: wii-rip-linux-x86_64
   DOLPHIN_REF: 2603a
   DOLPHIN_TOOL_PATH: build/dolphin-tool-cache/dolphin-tool
+  BANNER_RENDER_PATH: build/wii-banner-render-cache/wii-banner-render
 
 jobs:
   ubuntu-release:
@@ -33,14 +34,20 @@ jobs:
       - name: Restore Cargo cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Set dolphin-tool cache period
-        run: echo "DOLPHIN_CACHE_PERIOD=$(date -u +%Y-%m)" >> "$GITHUB_ENV"
+      - name: Set tool cache period
+        run: echo "TOOL_CACHE_PERIOD=$(date -u +%Y-%m)" >> "$GITHUB_ENV"
 
       - name: Restore dolphin-tool cache
         uses: actions/cache@v4
         with:
           path: ${{ env.DOLPHIN_TOOL_PATH }}
-          key: dolphin-tool-${{ runner.os }}-${{ env.DOLPHIN_REF }}-${{ env.DOLPHIN_CACHE_PERIOD }}
+          key: dolphin-tool-${{ runner.os }}-${{ env.DOLPHIN_REF }}-${{ env.TOOL_CACHE_PERIOD }}
+
+      - name: Restore wii-banner-render cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BANNER_RENDER_PATH }}
+          key: wii-banner-render-${{ runner.os }}-${{ env.TOOL_CACHE_PERIOD }}
 
       - name: Install Ubuntu build dependencies
         run: |
@@ -49,6 +56,8 @@ jobs:
             build-essential \
             cmake \
             gettext \
+            libglew-dev \
+            libegl-dev \
             ninja-build \
             patchelf \
             pkg-config \
@@ -59,6 +68,12 @@ jobs:
           ./packaging/build_dolphin_tool.sh \
             --ref "$DOLPHIN_REF" \
             --output "$DOLPHIN_TOOL_PATH" \
+            --skip-if-present
+
+      - name: Build wii-banner-render helper
+        run: |
+          ./packaging/build_banner_render.sh \
+            --output "$BANNER_RENDER_PATH" \
             --skip-if-present
 
       - name: Run linters
@@ -73,7 +88,8 @@ jobs:
             --name "$PACKAGE_NAME" \
             --tar \
             --dolphin-tool "$DOLPHIN_TOOL_PATH" \
-            --wit "$(command -v wit)"
+            --wit "$(command -v wit)" \
+            --banner-render "$BANNER_RENDER_PATH"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4

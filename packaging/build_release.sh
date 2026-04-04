@@ -10,6 +10,7 @@ create_tarball=0
 skip_build=0
 dolphin_tool_path=""
 wit_path=""
+banner_render_path=""
 
 usage() {
   cat <<'EOF'
@@ -19,15 +20,17 @@ Build the release binary and stage a portable release directory containing:
   - wii-rip
   - tools/dolphin-tool
   - tools/wit
+  - tools/wii-banner-render  (optional; required for --video / --video-only)
 
 Options:
-  --out-dir <dir>        Output parent directory (default: ./dist)
-  --name <name>          Package directory name (default: wii-rip-<os>-<arch>)
-  --dolphin-tool <path>  Explicit path to dolphin-tool
-  --wit <path>           Explicit path to wit
-  --tar                  Create a .tar.gz alongside the staged directory
-  --skip-build           Reuse an existing target/release/wii-rip binary
-  -h, --help             Show this help text
+  --out-dir <dir>              Output parent directory (default: ./dist)
+  --name <name>                Package directory name (default: wii-rip-<os>-<arch>)
+  --dolphin-tool <path>        Explicit path to dolphin-tool
+  --wit <path>                 Explicit path to wit
+  --banner-render <path>       Explicit path to wii-banner-render (optional)
+  --tar                        Create a .tar.gz alongside the staged directory
+  --skip-build                 Reuse an existing target/release/wii-rip binary
+  -h, --help                   Show this help text
 EOF
 }
 
@@ -51,6 +54,22 @@ resolve_tool() {
   discovered="$(command -v "$name" || true)"
   [[ -n "$discovered" ]] || fail "could not find '$name' in PATH; pass --$name with an explicit path"
   printf '%s\n' "$discovered"
+}
+
+# Like resolve_tool but returns an empty string (instead of failing) when the
+# tool is not found. Used for optional helpers like wii-banner-render.
+resolve_optional_tool() {
+  local name="$1"
+  local explicit_path="$2"
+
+  if [[ -n "$explicit_path" ]]; then
+    [[ -f "$explicit_path" ]] || fail "expected $name at $explicit_path, but no file exists there"
+    [[ -x "$explicit_path" ]] || fail "expected $name at $explicit_path to be executable"
+    printf '%s\n' "$explicit_path"
+    return
+  fi
+
+  command -v "$name" || true
 }
 
 bundle_libs() {
@@ -106,6 +125,11 @@ while (($# > 0)); do
       wit_path="$2"
       shift 2
       ;;
+    --banner-render)
+      (($# >= 2)) || fail "missing value for --banner-render"
+      banner_render_path="$2"
+      shift 2
+      ;;
     --tar)
       create_tarball=1
       shift
@@ -134,6 +158,7 @@ tools_dir="$package_dir/tools"
 
 dolphin_tool_path="$(resolve_tool dolphin-tool "$dolphin_tool_path")"
 wit_path="$(resolve_tool wit "$wit_path")"
+banner_render_path="$(resolve_optional_tool wii-banner-render "$banner_render_path")"
 
 if ((skip_build == 0)); then
   cargo build --release --manifest-path "$repo_root/Cargo.toml"
@@ -152,10 +177,21 @@ chmod 755 "$package_dir/$binary_name" "$tools_dir/dolphin-tool" "$tools_dir/wit"
 bundle_libs "$tools_dir/wit" "$tools_dir/lib"
 bundle_libs "$tools_dir/dolphin-tool" "$tools_dir/lib"
 
+if [[ -n "$banner_render_path" ]]; then
+  cp "$banner_render_path" "$tools_dir/wii-banner-render"
+  chmod 755 "$tools_dir/wii-banner-render"
+  bundle_libs "$tools_dir/wii-banner-render" "$tools_dir/lib"
+fi
+
 printf 'Packaged release directory:\n'
 printf '  binary: %s\n' "$package_dir/$binary_name"
 printf '  dolphin-tool: %s\n' "$tools_dir/dolphin-tool"
 printf '  wit: %s\n' "$tools_dir/wit"
+if [[ -n "$banner_render_path" ]]; then
+  printf '  wii-banner-render: %s\n' "$tools_dir/wii-banner-render"
+else
+  printf '  wii-banner-render: not included (--video / --video-only will not work in this bundle)\n'
+fi
 
 if ((create_tarball == 1)); then
   tarball_path="$output_root/$package_name.tar.gz"
