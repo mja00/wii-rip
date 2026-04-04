@@ -53,6 +53,30 @@ resolve_tool() {
   printf '%s\n' "$discovered"
 }
 
+bundle_libs() {
+  local binary="$1"
+  local lib_dir="$2"
+
+  # System libs that are guaranteed present on any Linux — skip these
+  local skip_regex='linux-vdso\.so|ld-linux|libc\.so|libm\.so|libdl\.so|librt\.so|libpthread\.so|libgcc_s\.so|libstdc\+\+\.so|libz\.so'
+
+  local lib_path
+  ldd "$binary" | while read -r line; do
+    lib_path="$(printf '%s\n' "$line" | grep -oP '=> \K/[^ ]+' || true)"
+    [[ -n "$lib_path" ]] || continue
+    if printf '%s\n' "$lib_path" | grep -qE "$skip_regex"; then
+      continue
+    fi
+    mkdir -p "$lib_dir"
+    cp -L "$lib_path" "$lib_dir/"
+  done
+
+  # Only set RPATH if we actually bundled any libs
+  if compgen -G "$lib_dir/*.so*" > /dev/null 2>&1; then
+    patchelf --set-rpath '$ORIGIN/lib' "$binary"
+  fi
+}
+
 default_package_name() {
   local os_name arch_name
   os_name="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -124,6 +148,9 @@ cp "$binary_path" "$package_dir/$binary_name"
 cp "$dolphin_tool_path" "$tools_dir/dolphin-tool"
 cp "$wit_path" "$tools_dir/wit"
 chmod 755 "$package_dir/$binary_name" "$tools_dir/dolphin-tool" "$tools_dir/wit"
+
+bundle_libs "$tools_dir/wit" "$tools_dir/lib"
+bundle_libs "$tools_dir/dolphin-tool" "$tools_dir/lib"
 
 printf 'Packaged release directory:\n'
 printf '  binary: %s\n' "$package_dir/$binary_name"

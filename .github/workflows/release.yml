@@ -50,6 +50,7 @@ jobs:
             cmake \
             gettext \
             ninja-build \
+            patchelf \
             pkg-config \
             wit
 

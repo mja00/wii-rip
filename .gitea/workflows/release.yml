@@ -47,6 +47,7 @@ jobs:
             gettext \
             jq \
             ninja-build \
+            patchelf \
             pkg-config \
             wit
 
