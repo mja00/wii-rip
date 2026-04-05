@@ -261,6 +261,15 @@ int main(int argc, char* argv[])
     // GX_Init sets up the GX-over-OpenGL shim used by the banner renderer.
     GX_Init(nullptr, 0);
 
+    // Layout::Render() assumes the viewer has already established a normalized
+    // top-left-origin orthographic projection.
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0.0, 1.0, 1.0, 0.0, -1000.0, 1000.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
     // Set GL state expected by the layout renderer.
     glEnable(GL_STENCIL_TEST);
     glEnable(GL_DEPTH_TEST);
