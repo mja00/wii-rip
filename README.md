@@ -133,6 +133,18 @@ Also render the banner animation to MP4 (requires `wii-banner-render`):
 ./target/release/wii-rip "Game.rvz" -o output/ --video
 ```
 
+Render the banner animation in 16:9 instead of the default 4:3:
+
+```bash
+./target/release/wii-rip "Game.rvz" -o output/ --video --video-aspect 16:9
+```
+
+Render both 4:3 and 16:9 variants:
+
+```bash
+./target/release/wii-rip "Game.rvz" -o output/ --video --video-aspect both
+```
+
 Render banner animation only, skip audio extraction:
 
 ```bash
@@ -145,9 +157,12 @@ Save the intermediate `sound.bin` alongside the WAV if you want to inspect it:
 ./target/release/wii-rip "Game.rvz" -o output/ --keep-temp
 ```
 
-When both `--video` and audio are extracted and `ffmpeg` is available, a single muxed
-`<stem>_disc_channel.mp4` (audio + video) is written. Without `ffmpeg`, the audio WAV
-and banner MP4 are written as separate files with a suggested mux command.
+When both `--video` and audio are extracted and `ffmpeg` is available, a muxed
+`<stem>_disc_channel.mp4` (audio + video) is written for the default 4:3 render.
+Non-default aspect outputs are suffixed, for example `*_disc_channel_16x9.mp4` and
+`*_disc_channel_banner_16x9.mp4`. With `--video-aspect both`, both suffixed variants
+are written. Without `ffmpeg`, the audio WAV and banner MP4s are written separately
+with suggested mux commands.
 
 The staged layout matches the runtime lookup order, so the packaged binary will find its bundled helpers automatically.
 

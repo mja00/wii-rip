@@ -24,6 +24,59 @@ struct Args {
     keep_temp: bool,
     video: bool,
     video_only: bool,
+    video_aspect: VideoAspectSelection,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VideoAspectSelection {
+    Standard,
+    Widescreen,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VideoAspect {
+    Standard,
+    Widescreen,
+}
+
+impl VideoAspectSelection {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "4:3" => Ok(Self::Standard),
+            "16:9" => Ok(Self::Widescreen),
+            "both" => Ok(Self::Both),
+            _ => bail!("unsupported --video-aspect '{value}'; expected one of: 4:3, 16:9, both"),
+        }
+    }
+
+    fn variants(self) -> &'static [VideoAspect] {
+        match self {
+            Self::Standard => &[VideoAspect::Standard],
+            Self::Widescreen => &[VideoAspect::Widescreen],
+            Self::Both => &[VideoAspect::Standard, VideoAspect::Widescreen],
+        }
+    }
+
+    fn keeps_legacy_filenames(self) -> bool {
+        matches!(self, Self::Standard)
+    }
+}
+
+impl VideoAspect {
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::Standard => "4:3",
+            Self::Widescreen => "16:9",
+        }
+    }
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Standard => "4x3",
+            Self::Widescreen => "16x9",
+        }
+    }
 }
 
 fn main() {
@@ -45,6 +98,7 @@ fn run() -> Result<()> {
         args.keep_temp,
         args.video,
         args.video_only,
+        args.video_aspect,
     )
 }
 
@@ -55,6 +109,7 @@ fn parse_args() -> Result<Args> {
     let mut keep_temp = false;
     let mut video = false;
     let mut video_only = false;
+    let mut video_aspect = VideoAspectSelection::Standard;
 
     while let Some(argument) = parser.next()? {
         match argument {
@@ -69,6 +124,13 @@ fn parse_args() -> Result<Args> {
             }
             Long("video-only") => {
                 video_only = true;
+            }
+            Long("video-aspect") => {
+                let value = parser.value()?;
+                let value = value
+                    .to_str()
+                    .context("--video-aspect must be valid UTF-8")?;
+                video_aspect = VideoAspectSelection::parse(value)?;
             }
             Short('h') | Long("help") => {
                 print_help();
@@ -94,12 +156,13 @@ fn parse_args() -> Result<Args> {
         keep_temp,
         video,
         video_only,
+        video_aspect,
     })
 }
 
 fn print_help() {
     println!(
-        "wii-rip\n\nExtract Wii disc channel audio and/or banner animation from .rvz, .iso, and .wbfs images.\n\nUSAGE:\n    wii-rip <input> [OPTIONS]\n\nOPTIONS:\n    -o, --output <dir>   Output directory (default: ./output)\n        --keep-temp      Save extracted sound.bin alongside the WAV\n        --video          Also render the banner animation to an MP4\n        --video-only     Render banner animation only; skip audio extraction\n    -h, --help           Show this help text\n\nEXTERNAL TOOLS:\n    dolphin-tool         Required for .rvz input (override: $WII_RIP_DOLPHIN_TOOL)\n    wit                  Required for disc image extraction (override: $WII_RIP_WIT)\n    wii-banner-render    Required for --video / --video-only (override: $WII_RIP_BANNER_RENDER)\n    ffmpeg               Optional; muxes audio + video into a single file (override: $WII_RIP_FFMPEG)\n"
+        "wii-rip\n\nExtract Wii disc channel audio and/or banner animation from .rvz, .iso, and .wbfs images.\n\nUSAGE:\n    wii-rip <input> [OPTIONS]\n\nOPTIONS:\n    -o, --output <dir>         Output directory (default: ./output)\n        --keep-temp            Save extracted sound.bin alongside the WAV\n        --video                Also render the banner animation to an MP4\n        --video-only           Render banner animation only; skip audio extraction\n        --video-aspect <mode>  Banner aspect ratio: 4:3, 16:9, or both (default: 4:3)\n    -h, --help                 Show this help text\n\nEXTERNAL TOOLS:\n    dolphin-tool         Required for .rvz input (override: $WII_RIP_DOLPHIN_TOOL)\n    wit                  Required for disc image extraction (override: $WII_RIP_WIT)\n    wii-banner-render    Required for --video / --video-only (override: $WII_RIP_BANNER_RENDER)\n    ffmpeg               Optional; muxes audio + video into a single file (override: $WII_RIP_FFMPEG)\n"
     );
 }
 
@@ -109,6 +172,7 @@ fn rip(
     keep_temp: bool,
     video: bool,
     video_only: bool,
+    video_aspect: VideoAspectSelection,
 ) -> Result<()> {
     let suffix = input_path
         .extension()
@@ -179,42 +243,61 @@ fn rip(
         None
     };
 
-    let banner_path = if video || video_only {
+    let banner_paths = if video || video_only {
         println!("Rendering banner animation...");
-        let banner_video_path = output_dir.join(format!("{stem}_disc_channel_banner.mp4"));
-        render_banner(&bnr_path, &banner_video_path)?;
-        Some(banner_video_path)
+        let mut banner_paths = Vec::new();
+        for aspect in video_aspect.variants() {
+            let banner_video_path =
+                output_dir.join(banner_output_name(&stem, *aspect, video_aspect));
+            render_banner(&bnr_path, &banner_video_path, *aspect)?;
+            banner_paths.push((*aspect, banner_video_path));
+        }
+        banner_paths
     } else {
-        None
+        Vec::new()
     };
 
-    match (&wav_path, &banner_path) {
-        (Some(wav), Some(banner)) => match try_find_tool("ffmpeg")? {
-            Some(ffmpeg) => {
-                println!("Muxing audio + video...");
-                let muxed_path = output_dir.join(format!("{stem}_disc_channel.mp4"));
-                mux_audio_video(&ffmpeg, wav, banner, &muxed_path)?;
-                println!("\nOutput: {}", muxed_path.display());
+    if let Some(wav) = &wav_path {
+        if !banner_paths.is_empty() {
+            match try_find_tool("ffmpeg")? {
+                Some(ffmpeg) => {
+                    println!("Muxing audio + video...");
+                    let mut muxed_paths = Vec::new();
+                    for (aspect, banner_path) in &banner_paths {
+                        let muxed_path =
+                            output_dir.join(muxed_output_name(&stem, *aspect, video_aspect));
+                        mux_audio_video(&ffmpeg, wav, banner_path, &muxed_path)?;
+                        muxed_paths.push(muxed_path);
+                    }
+                    print_output_paths(&muxed_paths);
+                }
+                None => {
+                    println!("\nffmpeg not found; audio and video saved as separate files.");
+                    println!("  To mux manually:");
+                    for (aspect, banner_path) in &banner_paths {
+                        let muxed_path =
+                            output_dir.join(muxed_output_name(&stem, *aspect, video_aspect));
+                        println!(
+                            "  ffmpeg -i \"{}\" -i \"{}\" -c:v copy -c:a aac -shortest -y \"{}\"",
+                            banner_path.display(),
+                            wav.display(),
+                            muxed_path.display()
+                        );
+                    }
+
+                    let mut outputs = vec![wav.clone()];
+                    outputs.extend(banner_paths.iter().map(|(_, path)| path.clone()));
+                    print_output_paths(&outputs);
+                }
             }
-            None => {
-                println!("\nffmpeg not found; audio and video saved as separate files.");
-                println!(
-                    "  To mux manually: ffmpeg -i \"{}\" -i \"{}\" -c:v copy -c:a aac -shortest -y <output.mp4>",
-                    banner.display(),
-                    wav.display()
-                );
-                println!("\nOutputs:");
-                println!("  {}", wav.display());
-                println!("  {}", banner.display());
-            }
-        },
-        (Some(wav), None) => {
-            println!("\nOutput: {}", wav.display());
+        } else {
+            print_output_paths(std::slice::from_ref(wav));
         }
-        (None, Some(banner)) => {
-            println!("\nOutput: {}", banner.display());
-        }
-        (None, None) => unreachable!("audio and video both skipped"),
+    } else if !banner_paths.is_empty() {
+        let outputs: Vec<PathBuf> = banner_paths.into_iter().map(|(_, path)| path).collect();
+        print_output_paths(&outputs);
+    } else {
+        unreachable!("audio and video both skipped");
     }
 
     Ok(())
@@ -292,7 +375,7 @@ fn extract_opening_bnr(image_path: &Path, extract_dir: &Path) -> Result<PathBuf>
     Ok(bnr_path)
 }
 
-fn render_banner(bnr_path: &Path, output_path: &Path) -> Result<()> {
+fn render_banner(bnr_path: &Path, output_path: &Path, aspect: VideoAspect) -> Result<()> {
     let renderer = check_tool("wii-banner-render")?;
     let output = Command::new(&renderer)
         .args([
@@ -303,6 +386,8 @@ fn render_banner(bnr_path: &Path, output_path: &Path) -> Result<()> {
             output_path.to_str().context(
                 "output path contains non-UTF-8 data unsupported by wii-banner-render invocation",
             )?,
+            "--aspect",
+            aspect.cli_value(),
         ])
         .output()
         .with_context(|| format!("failed to run {}", renderer.display()))?;
@@ -316,6 +401,34 @@ fn render_banner(bnr_path: &Path, output_path: &Path) -> Result<()> {
 
     println!("  Banner video written to: {}", output_path.display());
     Ok(())
+}
+
+fn banner_output_name(stem: &str, aspect: VideoAspect, selection: VideoAspectSelection) -> String {
+    if selection.keeps_legacy_filenames() && aspect == VideoAspect::Standard {
+        format!("{stem}_disc_channel_banner.mp4")
+    } else {
+        format!("{stem}_disc_channel_banner_{}.mp4", aspect.suffix())
+    }
+}
+
+fn muxed_output_name(stem: &str, aspect: VideoAspect, selection: VideoAspectSelection) -> String {
+    if selection.keeps_legacy_filenames() && aspect == VideoAspect::Standard {
+        format!("{stem}_disc_channel.mp4")
+    } else {
+        format!("{stem}_disc_channel_{}.mp4", aspect.suffix())
+    }
+}
+
+fn print_output_paths(paths: &[PathBuf]) {
+    match paths {
+        [path] => println!("\nOutput: {}", path.display()),
+        _ => {
+            println!("\nOutputs:");
+            for path in paths {
+                println!("  {}", path.display());
+            }
+        }
+    }
 }
 
 fn mux_audio_video(

@@ -30,6 +30,7 @@ distribution.
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -41,12 +42,39 @@ distribution.
 #include "Types.h"
 #include "WrapGx.h"
 
-static const int BANNER_WIDTH  = 608;
 static const int BANNER_HEIGHT = 456;
-static const float BANNER_ASPECT = static_cast<float>(BANNER_WIDTH) / BANNER_HEIGHT;
+static const int BANNER_WIDTH_4X3 = 608;
+static const int BANNER_WIDTH_16X9 = 810;
 // Matches the crop factor used by the original wii-banner-player:
 // slightly zooms in to trim 6px off each side of the 608px-wide banner.
-static const float BANNER_CROP = static_cast<float>(BANNER_WIDTH) / (BANNER_WIDTH - 12);
+static const float BANNER_CROP = static_cast<float>(BANNER_WIDTH_4X3) / (BANNER_WIDTH_4X3 - 12);
+
+enum class RenderAspect
+{
+    Standard,
+    Widescreen,
+};
+
+struct RenderProfile
+{
+    int width;
+    int height;
+    float layout_aspect;
+    const char* ffmpeg_aspect;
+};
+
+static RenderProfile get_render_profile(RenderAspect aspect)
+{
+    switch (aspect)
+    {
+    case RenderAspect::Standard:
+        return {BANNER_WIDTH_4X3, BANNER_HEIGHT, 4.f / 3.f, "4:3"};
+    case RenderAspect::Widescreen:
+        return {BANNER_WIDTH_16X9, BANNER_HEIGHT, 16.f / 9.f, "16:9"};
+    }
+
+    return {BANNER_WIDTH_4X3, BANNER_HEIGHT, 4.f / 3.f, "4:3"};
+}
 
 // ---------------------------------------------------------------------------
 // EGL headless context
@@ -72,7 +100,7 @@ struct EGLState
     }
 };
 
-static bool init_egl(EGLState& egl)
+static bool init_egl(EGLState& egl, int width, int height)
 {
     egl.display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (egl.display == EGL_NO_DISPLAY)
@@ -116,13 +144,13 @@ static bool init_egl(EGLState& egl)
         return false;
     }
 
-    static const EGLint PBUFFER_ATTRIBS[] = {
-        EGL_WIDTH,  BANNER_WIDTH,
-        EGL_HEIGHT, BANNER_HEIGHT,
+    EGLint pbuffer_attribs[] = {
+        EGL_WIDTH,  width,
+        EGL_HEIGHT, height,
         EGL_NONE
     };
 
-    egl.surface = eglCreatePbufferSurface(egl.display, config, PBUFFER_ATTRIBS);
+    egl.surface = eglCreatePbufferSurface(egl.display, config, pbuffer_attribs);
     if (egl.surface == EGL_NO_SURFACE)
     {
         std::cerr << "wii-banner-render: eglCreatePbufferSurface failed\n";
@@ -156,6 +184,7 @@ static void print_usage(const char* prog)
         << "Render a Wii disc channel banner animation to a video file.\n\n"
         << "Options:\n"
         << "  -o, --output <path>   Output video file (required)\n"
+        << "      --aspect <mode>   Banner aspect ratio: 4:3 or 16:9 (default: 4:3)\n"
         << "      --fps <n>         Frame rate (default: 60)\n"
         << "      --loops <n>       Number of animation loop cycles (default: 1)\n"
         << "      --ffmpeg <path>   Path to ffmpeg binary (default: ffmpeg)\n"
@@ -173,6 +202,7 @@ int main(int argc, char* argv[])
     std::string output_path;
     std::string ffmpeg_path = "ffmpeg";
     std::string language    = "ENG";
+    RenderAspect render_aspect = RenderAspect::Standard;
     int fps   = 60;
     int loops = 1;
 
@@ -183,6 +213,19 @@ int main(int argc, char* argv[])
         if ((arg == "-o" || arg == "--output") && i + 1 < argc)
         {
             output_path = argv[++i];
+        }
+        else if (arg == "--aspect" && i + 1 < argc)
+        {
+            const std::string aspect = argv[++i];
+            if (aspect == "4:3")
+                render_aspect = RenderAspect::Standard;
+            else if (aspect == "16:9")
+                render_aspect = RenderAspect::Widescreen;
+            else
+            {
+                std::cerr << "wii-banner-render: invalid --aspect value: " << aspect << "\n";
+                return 1;
+            }
         }
         else if (arg == "--fps" && i + 1 < argc)
         {
@@ -244,8 +287,10 @@ int main(int argc, char* argv[])
     // Initialize EGL offscreen OpenGL context
     // ------------------------------------------------------------------
 
+    const RenderProfile profile = get_render_profile(render_aspect);
+
     EGLState egl;
-    if (!init_egl(egl))
+    if (!init_egl(egl, profile.width, profile.height))
         return 1;
 
     // Initialize GLEW against the active EGL context.
@@ -274,7 +319,7 @@ int main(int argc, char* argv[])
     glEnable(GL_STENCIL_TEST);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_ALWAYS);
-    glViewport(0, 0, BANNER_WIDTH, BANNER_HEIGHT);
+    glViewport(0, 0, profile.width, profile.height);
 
     // ------------------------------------------------------------------
     // Load banner
@@ -306,7 +351,7 @@ int main(int argc, char* argv[])
     else
         frames_to_render = std::max(loop_start, 1);
 
-    std::cerr << "wii-banner-render: " << BANNER_WIDTH << "x" << BANNER_HEIGHT
+    std::cerr << "wii-banner-render: " << profile.width << "x" << profile.height
               << ", " << frames_to_render << " frames"
               << " (start=" << loop_start << ", loop=" << loop_length << "x" << loops << ")"
               << " at " << fps << " fps"
@@ -324,12 +369,13 @@ int main(int argc, char* argv[])
         "\"" + ffmpeg_path + "\""
         " -f rawvideo"
         " -pix_fmt rgba"
-        " -s " + std::to_string(BANNER_WIDTH) + "x" + std::to_string(BANNER_HEIGHT) +
+        " -s " + std::to_string(profile.width) + "x" + std::to_string(profile.height) +
         " -r " + std::to_string(fps) +
         " -i pipe:0"
         " -vf vflip"
         " -c:v libx264"
         " -pix_fmt yuv420p"
+        " -aspect " + std::string(profile.ffmpeg_aspect) +
         " -loglevel warning"
         " -y"
         " \"" + output_path + "\" 2>&1 >&2";
@@ -347,7 +393,7 @@ int main(int argc, char* argv[])
     // Render loop
     // ------------------------------------------------------------------
 
-    std::vector<uint8_t> pixels(BANNER_WIDTH * BANNER_HEIGHT * 4);
+    std::vector<uint8_t> pixels(profile.width * profile.height * 4);
 
     // Initialise to frame 0 then advance through the animation using
     // AdvanceFrame(), which handles the start->loop transition correctly.
@@ -360,10 +406,10 @@ int main(int argc, char* argv[])
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
         glPushAttrib(GL_ALL_ATTRIB_BITS);
-        layout->Render(BANNER_ASPECT, BANNER_CROP);
+        layout->Render(profile.layout_aspect, BANNER_CROP);
         glPopAttrib();
 
-        glReadPixels(0, 0, BANNER_WIDTH, BANNER_HEIGHT,
+        glReadPixels(0, 0, profile.width, profile.height,
                      GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 
         if (fwrite(pixels.data(), 1, pixels.size(), ffmpeg) != pixels.size())
