@@ -57,6 +57,34 @@ sudo apt-get install build-essential cmake ninja-build libglew-dev libegl-dev
 encoding. Mesa's software rasterizer (`libgl1-mesa-dri`) handles headless OpenGL
 on machines without a GPU; this is typically installed by default on Ubuntu.
 
+**macOS:** `wii-banner-render` relies on EGL headers/libraries that are
+Linux-only, so it is not built on macOS. The macOS release bundle omits this
+helper; `--video` / `--video-only` are therefore unsupported in that bundle.
+Audio extraction works identically on macOS and Linux.
+
+## Building wit
+
+On Ubuntu, `wit` is available from the system package archive (`apt-get
+install wit`) and no source build is required. On macOS, install
+[Homebrew](https://brew.sh/) and then build `wit` from Wiimms' sources:
+
+```bash
+brew install cmake gawk          # gawk is required by wit's setup.sh
+./packaging/build_wit.sh
+# binary written to: build/wit/wit
+```
+
+The script clones
+[Wiimm/wiimms-iso-tools](https://github.com/Wiimm/wiimms-iso-tools), runs its
+`Makefile`, and works around two macOS-specific quirks automatically:
+
+- macOS ships BSD awk, which lacks gawk's `gensub()` extension used by wit's
+  `setup.sh`. The script prepends Homebrew's gawk to `PATH` before invoking
+  make so that `SYSTEM := mac` is detected correctly.
+- Apple Silicon's modern linker rejects a misaligned atom in
+  `dclib-numeric.o`. The script passes `XFLAGS=-Wl,-ld_classic` to fall back
+  to the classic linker (tolerated by current Xcode releases).
+
 ## Package A Release Directory
 
 Build a portable directory that bundles the Rust binary with `dolphin-tool`,
@@ -75,13 +103,17 @@ This writes a directory like:
 
 ```text
 dist/
-  wii-rip-linux-x86_64/
+  wii-rip-linux-x86_64/            (or wii-rip-macos-arm64/ on macOS)
     wii-rip
     tools/
       dolphin-tool
       wit
-      wii-banner-render   (when --banner-render is passed)
+      wii-banner-render   (when --banner-render is passed; Linux only)
 ```
+
+The default package name is derived from `uname -s`/`uname -m`. On Linux it
+looks like `wii-rip-linux-x86_64`; on macOS it looks like
+`wii-rip-macos-arm64` or `wii-rip-macos-x86_64`.
 
 You can also create a tarball at the same time:
 
@@ -100,24 +132,43 @@ Override helper paths if they are not on `PATH`:
 
 ## GitHub Actions Releases
 
-An Ubuntu release workflow lives at `.github/workflows/release.yml`.
+The release workflow lives at `.github/workflows/release.yml` and runs two
+jobs in parallel:
 
-- Pull requests and pushes to `main` build and validate the bundled Linux release artifact.
-- Tags matching `v*` also publish `dist/wii-rip-linux-x86_64.tar.gz` to the GitHub Release.
+- `ubuntu-release` — runs on `ubuntu-latest`, source-builds `dolphin-tool` and
+  `wii-banner-render`, installs `wit` from the Ubuntu package archive, and
+  produces `dist/wii-rip-linux-x86_64.tar.gz`.
+- `macos-release` — runs on `macos-latest` (Apple Silicon), source-builds
+  `dolphin-tool` and `wit`, and produces `dist/wii-rip-macos-arm64.tar.gz`.
+  `wii-banner-render` is omitted because its upstream uses EGL which is not
+  available on macOS, so `--video` / `--video-only` are unsupported in the
+  macOS bundle.
 
-The workflow source-builds both `dolphin-tool` and `wii-banner-render`, caching
-each binary on a monthly key. `wit` is installed from the Ubuntu package archive.
+Pull requests and pushes to `main` build and validate both artifacts. Tags
+matching `v*` additionally publish both tarballs to the GitHub Release.
+
+Each helper binary is cached on a monthly key per OS so the first build
+dominates and subsequent runs reuse the cached binaries.
 
 ## Gitea Actions Releases
 
-A matching Gitea workflow lives at `.gitea/workflows/release.yml`.
+A matching Gitea workflow lives at `.gitea/workflows/release.yml` with the
+same two jobs.
 
-- Pull requests and pushes to `main` run the same Ubuntu build, lint, test, and package flow.
-- Those runs also upload `wii-rip-linux-x86_64.tar.gz` as a workflow artifact.
-- Tags matching `v*` publish `dist/wii-rip-linux-x86_64.tar.gz` to the matching Gitea release.
+- Pull requests and pushes to `main` run the same lint, test, and package
+  flow for both platforms.
+- Those runs upload `wii-rip-linux-x86_64.tar.gz` and (when a macOS runner is
+  available) `wii-rip-macos-arm64.tar.gz` as workflow artifacts.
+- Tags matching `v*` publish the corresponding tarballs to the matching Gitea
+  release.
 
-The Gitea workflow expects a repository secret named `RELEASE_TOKEN` with permission to create releases and upload release assets.
-Like the GitHub workflow, it restores monthly caches for `dolphin-tool` and `wii-banner-render` before falling back to a source build.
+The Gitea workflow expects a repository secret named `RELEASE_TOKEN` with
+permission to create releases and upload release assets. Like the GitHub
+workflow, it restores monthly caches for `dolphin-tool`, `wii-banner-render`,
+and `wit` before falling back to a source build. The `macos-release` job
+targets a self-hosted runner labelled `macos-latest`; if no such runner is
+registered in your Gitea deployment the job will stay queued and can be
+ignored, while `ubuntu-release` still ships the Linux bundle.
 
 ## Usage
 
@@ -174,7 +225,13 @@ cargo run -- "Game.rvz" -o output/
 
 ## Notes
 
-- Linux and macOS are the supported targets.
+- Linux and macOS are the supported targets. The Rust binary builds with no
+  code changes on both platforms; CI publishes tarballs for
+  `linux-x86_64` and `macos-arm64`.
+- Audio extraction works identically on Linux and macOS. Banner-animation
+  video (`--video` / `--video-only`) is Linux-only in the current bundles
+  because `wii-banner-render` relies on EGL headers that are not available on
+  macOS.
 - `dolphin-tool`, `wit`, and `wii-banner-render` remain external dependencies.
 - Releases that bundle these helpers should include the relevant GPL/zlib license texts and corresponding-source information for the exact bundled binaries.
 - `wii-banner-render` is based on the [wii-banner-player](https://github.com/jordan-woyak/wii-banner-player) project (zlib license) and uses the NW4R layout engine re-implementation from that project.

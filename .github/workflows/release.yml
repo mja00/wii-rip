@@ -13,14 +13,16 @@ permissions:
   contents: write
 
 env:
-  PACKAGE_NAME: wii-rip-linux-x86_64
   DOLPHIN_REF: 2603a
-  DOLPHIN_TOOL_PATH: build/dolphin-tool-cache/dolphin-tool
-  BANNER_RENDER_PATH: build/wii-banner-render-cache/wii-banner-render
 
 jobs:
   ubuntu-release:
     runs-on: ubuntu-latest
+
+    env:
+      PACKAGE_NAME: wii-rip-linux-x86_64
+      DOLPHIN_TOOL_PATH: build/dolphin-tool-cache/dolphin-tool
+      BANNER_RENDER_PATH: build/wii-banner-render-cache/wii-banner-render
 
     steps:
       - name: Check out repository
@@ -91,6 +93,96 @@ jobs:
             --dolphin-tool "$DOLPHIN_TOOL_PATH" \
             --wit "$(command -v wit)" \
             --banner-render "$BANNER_RENDER_PATH"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: dist/${{ env.PACKAGE_NAME }}.tar.gz
+          if-no-files-found: error
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ env.PACKAGE_NAME }}.tar.gz
+
+  macos-release:
+    # macos-latest maps to an Apple Silicon runner; use an explicit matrix
+    # entry if you ever want to build for Intel too.
+    runs-on: macos-latest
+
+    env:
+      PACKAGE_NAME: wii-rip-macos-arm64
+      DOLPHIN_TOOL_PATH: build/dolphin-tool-cache/dolphin-tool
+      WIT_PATH: build/wit-cache/wit
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set tool cache period
+        run: echo "TOOL_CACHE_PERIOD=$(date -u +%Y-%m)" >> "$GITHUB_ENV"
+
+      - name: Restore dolphin-tool cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DOLPHIN_TOOL_PATH }}
+          key: dolphin-tool-${{ runner.os }}-${{ env.DOLPHIN_REF }}-${{ env.TOOL_CACHE_PERIOD }}
+
+      - name: Restore wit cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WIT_PATH }}
+          key: wit-${{ runner.os }}-${{ env.TOOL_CACHE_PERIOD }}
+
+      - name: Install macOS build dependencies
+        run: |
+          brew update
+          # cmake + ninja are required by the dolphin-tool build, gawk is
+          # required by wit's setup.sh (gensub() is a gawk extension; BSD awk
+          # lacks it). Dolphin's USE_SYSTEM_LIBS=OFF bundles its own Boost via
+          # Externals, so no system Boost is required.
+          brew install cmake ninja gawk
+
+      - name: Build dolphin-tool helper
+        run: |
+          ./packaging/build_dolphin_tool.sh \
+            --ref "$DOLPHIN_REF" \
+            --output "$DOLPHIN_TOOL_PATH" \
+            --skip-if-present
+
+      - name: Build wit helper
+        run: |
+          ./packaging/build_wit.sh \
+            --output "$WIT_PATH" \
+            --skip-if-present
+
+      - name: Run linters
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Package bundled release
+        run: |
+          # wii-banner-render is not built on macOS in this workflow because
+          # its upstream uses EGL headers which do not exist on macOS. The
+          # release bundle omits it — --video / --video-only are not supported
+          # in the macOS bundle.
+          ./packaging/build_release.sh \
+            --name "$PACKAGE_NAME" \
+            --tar \
+            --dolphin-tool "$DOLPHIN_TOOL_PATH" \
+            --wit "$WIT_PATH"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4

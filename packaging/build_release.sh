@@ -72,7 +72,7 @@ resolve_optional_tool() {
   command -v "$name" || true
 }
 
-bundle_libs() {
+bundle_libs_linux() {
   local binary="$1"
   local lib_dir="$2"
 
@@ -96,10 +96,156 @@ bundle_libs() {
   fi
 }
 
+# macOS equivalent of bundle_libs_linux using otool + install_name_tool.
+#
+# Walks the dependency graph of `binary` transitively. For every non-system
+# dylib it encounters, it copies the file next to the binary (into $lib_dir),
+# rewrites the referencing binary's install names to `@rpath/<name>`, rewrites
+# the copied dylib's own LC_ID_DYLIB to `@rpath/<name>` so transitive rewrites
+# match, and adds `@loader_path/lib` as an rpath on the top-level binary.
+#
+# System libraries shipped with macOS (/usr/lib/*, /System/*) are skipped
+# because they are guaranteed to be present on any target mac. References
+# that already use @rpath, @loader_path, or @executable_path are assumed to
+# be self-contained and are left alone.
+bundle_libs_macos() {
+  local binary="$1"
+  local lib_dir="$2"
+
+  command -v otool >/dev/null 2>&1 \
+    || fail "otool is required to bundle dylibs on macOS (install Xcode command line tools)"
+  command -v install_name_tool >/dev/null 2>&1 \
+    || fail "install_name_tool is required to bundle dylibs on macOS (install Xcode command line tools)"
+
+  # Emit every non-system dylib reference from a Mach-O file, one per line.
+  # Skips the first otool line (the file's own install name) and any
+  # @rpath/@loader_path/@executable_path entries.
+  _list_external_dylibs() {
+    local target="$1"
+    local line ref
+    while IFS= read -r line; do
+      ref="${line#"${line%%[![:space:]]*}"}"
+      ref="${ref% (*}"
+      [[ -n "$ref" ]] || continue
+      case "$ref" in
+        *":") continue ;;                         # "binary:" header line
+        /usr/lib/*|/System/*) continue ;;         # macOS system libs
+        @rpath/*|@loader_path/*|@executable_path/*) continue ;;
+      esac
+      printf '%s\n' "$ref"
+    done < <(otool -L "$target" 2>/dev/null)
+  }
+
+  # macOS ships bash 3.2, which does not support associative arrays.
+  # Track processed refs as newline-separated entries in a single string
+  # so membership is a plain substring check against a delimited sentinel.
+  local queue=()
+  local processed=$'\n'
+
+  # Seed the queue with the binary's direct external dependencies.
+  local dep
+  while IFS= read -r dep; do
+    [[ -n "$dep" ]] && queue+=("$dep")
+  done < <(_list_external_dylibs "$binary")
+
+  local bundled_any=0
+  while ((${#queue[@]} > 0)); do
+    local ref="${queue[0]}"
+    queue=("${queue[@]:1}")
+
+    # Skip anything we have already seen. The newline-delimited substring
+    # check is O(n) per lookup but the dep graphs we bundle are small.
+    case "$processed" in
+      *$'\n'"$ref"$'\n'*) continue ;;
+    esac
+    processed+="$ref"$'\n'
+
+    if [[ ! -f "$ref" ]]; then
+      printf 'warning: dylib referenced somewhere in %s not found on disk: %s\n' \
+        "$binary" "$ref" >&2
+      continue
+    fi
+
+    mkdir -p "$lib_dir"
+    local base dest
+    base="$(basename "$ref")"
+    dest="$lib_dir/$base"
+
+    local dep_is_new=0
+    if [[ ! -f "$dest" ]]; then
+      cp -L "$ref" "$dest"
+      chmod u+w "$dest"
+      install_name_tool -id "@rpath/$base" "$dest" 2>/dev/null || true
+      dep_is_new=1
+    fi
+
+    # Rewrite the reference in the top-level binary (harmless if the binary
+    # does not actually reference it — install_name_tool -change is a no-op
+    # when the old name is not present).
+    install_name_tool -change "$ref" "@rpath/$base" "$binary" 2>/dev/null || true
+
+    # Also rewrite the reference in every already-bundled dylib that might
+    # depend on this one. Since we copied each dep into $lib_dir, it is
+    # sufficient to rewrite every *.dylib under $lib_dir. This is cheap and
+    # ensures correct chains regardless of traversal order.
+    local copied
+    for copied in "$lib_dir"/*.dylib; do
+      [[ -f "$copied" ]] || continue
+      install_name_tool -change "$ref" "@rpath/$base" "$copied" 2>/dev/null || true
+    done
+
+    bundled_any=1
+
+    # Walk transitively: enqueue every external dependency of the copy we
+    # just made. Using the copy means the queue sees canonicalised paths.
+    if ((dep_is_new == 1)); then
+      local transitive
+      while IFS= read -r transitive; do
+        [[ -n "$transitive" ]] || continue
+        case "$processed" in
+          *$'\n'"$transitive"$'\n'*) continue ;;
+        esac
+        queue+=("$transitive")
+      done < <(_list_external_dylibs "$dest")
+    fi
+  done
+
+  if ((bundled_any == 1)); then
+    # Add an rpath that resolves to the bundled lib dir regardless of cwd.
+    # Tolerate "file already has LC_RPATH" errors if called repeatedly.
+    install_name_tool -add_rpath '@loader_path/lib' "$binary" 2>/dev/null || true
+  fi
+}
+
+bundle_libs() {
+  local binary="$1"
+  local lib_dir="$2"
+
+  case "$(uname -s)" in
+    Linux)
+      bundle_libs_linux "$binary" "$lib_dir"
+      ;;
+    Darwin)
+      bundle_libs_macos "$binary" "$lib_dir"
+      ;;
+    *)
+      fail "unsupported platform for library bundling: $(uname -s)"
+      ;;
+  esac
+}
+
 default_package_name() {
-  local os_name arch_name
-  os_name="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  local os_raw os_name arch_name
+  os_raw="$(uname -s | tr '[:upper:]' '[:lower:]')"
   arch_name="$(uname -m | tr '[:upper:]' '[:lower:]')"
+  case "$os_raw" in
+    darwin)
+      os_name="macos"
+      ;;
+    *)
+      os_name="$os_raw"
+      ;;
+  esac
   printf '%s-%s-%s\n' "$binary_name" "$os_name" "$arch_name"
 }
 

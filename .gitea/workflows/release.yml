@@ -10,14 +10,16 @@ on:
   workflow_dispatch:
 
 env:
-  PACKAGE_NAME: wii-rip-linux-x86_64
   DOLPHIN_REF: 2603a
-  DOLPHIN_TOOL_PATH: build/dolphin-tool-cache/dolphin-tool
-  BANNER_RENDER_PATH: build/wii-banner-render-cache/wii-banner-render
 
 jobs:
   ubuntu-release:
     runs-on: ubuntu-latest
+
+    env:
+      PACKAGE_NAME: wii-rip-linux-x86_64
+      DOLPHIN_TOOL_PATH: build/dolphin-tool-cache/dolphin-tool
+      BANNER_RENDER_PATH: build/wii-banner-render-cache/wii-banner-render
 
     steps:
       - name: Check out repository
@@ -87,6 +89,154 @@ jobs:
             --dolphin-tool "$DOLPHIN_TOOL_PATH" \
             --wit "$(command -v wit)" \
             --banner-render "$BANNER_RENDER_PATH"
+
+      - name: Show packaged artifact
+        run: ls -lh "dist/$PACKAGE_NAME.tar.gz"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: dist/${{ env.PACKAGE_NAME }}.tar.gz
+          if-no-files-found: error
+
+      - name: Publish Gitea release assets
+        if: startsWith(gitea.ref, 'refs/tags/v')
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [[ -z "${RELEASE_TOKEN:-}" ]]; then
+            printf 'RELEASE_TOKEN secret is required to publish tag releases.\n' >&2
+            exit 1
+          fi
+
+          repo="${GITHUB_REPOSITORY:-${GITEA_REPOSITORY:-}}"
+          tag="${GITHUB_REF_NAME:-${GITEA_REF_NAME:-${GITEA_REF##refs/tags/}}}"
+          api_root="${GITEA_SERVER_URL%/}/api/v1"
+          asset_path="dist/$PACKAGE_NAME.tar.gz"
+          asset_name="$(basename "$asset_path")"
+
+          release_endpoint="$api_root/repos/$repo/releases/tags/$tag"
+          release_id="$({ curl --silent --show-error --fail \
+            -H "Authorization: token $RELEASE_TOKEN" \
+            "$release_endpoint" || true; } | jq -r '.id // empty')"
+
+          if [[ -z "$release_id" ]]; then
+            release_id="$(curl --silent --show-error --fail \
+              -X POST \
+              -H "Authorization: token $RELEASE_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"tag_name\":\"$tag\",\"name\":\"$tag\"}" \
+              "$api_root/repos/$repo/releases" | jq -r '.id')"
+          fi
+
+          existing_asset_id="$({ curl --silent --show-error --fail \
+            -H "Authorization: token $RELEASE_TOKEN" \
+            "$api_root/repos/$repo/releases/$release_id/assets" || true; } \
+            | jq -r ".[] | select(.name == \"$asset_name\") | .id")"
+
+          if [[ -n "$existing_asset_id" ]]; then
+            curl --silent --show-error --fail \
+              -X DELETE \
+              -H "Authorization: token $RELEASE_TOKEN" \
+              "$api_root/repos/$repo/releases/$release_id/assets/$existing_asset_id"
+          fi
+
+          curl --silent --show-error --fail \
+            -X POST \
+            -H "Authorization: token $RELEASE_TOKEN" \
+            -H "Content-Type: application/gzip" \
+            --data-binary "@$asset_path" \
+            "$api_root/repos/$repo/releases/$release_id/assets?name=$asset_name"
+
+  macos-release:
+    # Runs on any self-hosted runner with the 'macos-latest' label. If the
+    # Gitea deployment has no such runner the job will remain queued and can
+    # be safely ignored — the ubuntu-release job covers the primary Linux
+    # release flow. Add a macOS runner to the Gitea runner pool to publish
+    # macOS release artifacts.
+    runs-on: macos-latest
+
+    env:
+      PACKAGE_NAME: wii-rip-macos-arm64
+      DOLPHIN_TOOL_PATH: build/dolphin-tool-cache/dolphin-tool
+      WIT_PATH: build/wit-cache/wit
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          if command -v rustup >/dev/null 2>&1; then
+            rustup_bin="$(command -v rustup)"
+          else
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal
+            rustup_bin="$HOME/.cargo/bin/rustup"
+            printf '%s/bin\n' "$HOME/.cargo" >> "$GITHUB_PATH"
+          fi
+          "$rustup_bin" component add clippy
+
+      - name: Set tool cache period
+        run: echo "TOOL_CACHE_PERIOD=$(date -u +%Y-%m)" >> "$GITHUB_ENV"
+
+      - name: Restore dolphin-tool cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DOLPHIN_TOOL_PATH }}
+          key: dolphin-tool-macos-${{ env.DOLPHIN_REF }}-${{ env.TOOL_CACHE_PERIOD }}
+
+      - name: Restore wit cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WIT_PATH }}
+          key: wit-macos-${{ env.TOOL_CACHE_PERIOD }}
+
+      - name: Install macOS build dependencies
+        run: |
+          if command -v brew >/dev/null 2>&1; then
+            brew update
+            # cmake + ninja are required by the dolphin-tool build, gawk is
+            # required by wit's setup.sh (gensub() is a gawk extension; BSD
+            # awk lacks it). Dolphin's USE_SYSTEM_LIBS=OFF bundles its own
+            # Boost via Externals, so no system Boost is required.
+            brew install cmake ninja gawk || true
+          else
+            echo "Homebrew not found on this runner; ensure cmake, ninja, and gawk are available." >&2
+            exit 1
+          fi
+
+      - name: Build dolphin-tool helper
+        run: |
+          ./packaging/build_dolphin_tool.sh \
+            --ref "$DOLPHIN_REF" \
+            --output "$DOLPHIN_TOOL_PATH" \
+            --skip-if-present
+
+      - name: Build wit helper
+        run: |
+          ./packaging/build_wit.sh \
+            --output "$WIT_PATH" \
+            --skip-if-present
+
+      - name: Run linters
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Package bundled release
+        run: |
+          # wii-banner-render is not built on macOS in this workflow because
+          # its upstream uses EGL headers which do not exist on macOS. The
+          # release bundle omits it — --video / --video-only are not supported
+          # in the macOS bundle.
+          ./packaging/build_release.sh \
+            --name "$PACKAGE_NAME" \
+            --tar \
+            --dolphin-tool "$DOLPHIN_TOOL_PATH" \
+            --wit "$WIT_PATH"
 
       - name: Show packaged artifact
         run: ls -lh "dist/$PACKAGE_NAME.tar.gz"

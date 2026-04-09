@@ -100,35 +100,80 @@ git \
   -C "$source_dir" \
   submodule update --init --recursive --depth 1 --jobs "$jobs"
 
-cmake -S "$source_dir" -B "$build_dir" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DUSE_SYSTEM_LIBS=OFF \
-  -DENABLE_CLI_TOOL=ON \
-  -DENABLE_HEADLESS=ON \
-  -DENABLE_QT=OFF \
-  -DENABLE_NOGUI=OFF \
-  -DENABLE_TESTS=OFF \
-  -DENABLE_VULKAN=OFF \
-  -DENABLE_X11=OFF \
-  -DENABLE_EGL=OFF \
-  -DENABLE_ALSA=OFF \
-  -DENABLE_PULSEAUDIO=OFF \
-  -DENABLE_CUBEB=OFF \
-  -DENABLE_LLVM=OFF \
-  -DENABLE_SDL=OFF \
-  -DENABLE_AUTOUPDATE=OFF \
-  -DENABLE_ANALYTICS=OFF \
-  -DENCODE_FRAMEDUMPS=OFF \
-  -DUSE_DISCORD_PRESENCE=OFF \
-  -DUSE_MGBA=OFF \
-  -DUSE_UPNP=OFF \
-  -DENABLE_HWDB=OFF \
+cmake_args=(
+  -S "$source_dir"
+  -B "$build_dir"
+  -G Ninja
+  -DCMAKE_BUILD_TYPE=Release
+  -DUSE_SYSTEM_LIBS=OFF
+  -DENABLE_CLI_TOOL=ON
+  -DENABLE_HEADLESS=ON
+  -DENABLE_QT=OFF
+  -DENABLE_NOGUI=OFF
+  -DENABLE_TESTS=OFF
+  -DENABLE_VULKAN=OFF
+  -DENABLE_X11=OFF
+  -DENABLE_EGL=OFF
+  -DENABLE_ALSA=OFF
+  -DENABLE_PULSEAUDIO=OFF
+  -DENABLE_CUBEB=OFF
+  -DENABLE_LLVM=OFF
+  -DENABLE_SDL=OFF
+  -DENABLE_AUTOUPDATE=OFF
+  -DENABLE_ANALYTICS=OFF
+  -DENCODE_FRAMEDUMPS=OFF
+  -DUSE_DISCORD_PRESENCE=OFF
+  -DUSE_MGBA=OFF
+  -DUSE_UPNP=OFF
+  -DENABLE_HWDB=OFF
   -DENABLE_EVDEV=OFF
+)
+
+case "$(uname -s)" in
+  Darwin)
+    # Force the host architecture so Dolphin's CMake does not try to produce a
+    # universal binary (the external libraries are not all built as universal).
+    cmake_args+=("-DCMAKE_OSX_ARCHITECTURES=$(uname -m)")
+    # Target the running macOS version; avoids failures when Dolphin guesses a
+    # target newer than the SDK can satisfy.
+    if command -v sw_vers >/dev/null 2>&1; then
+      macos_version="$(sw_vers -productVersion | cut -d. -f1,2)"
+      cmake_args+=("-DCMAKE_OSX_DEPLOYMENT_TARGET=$macos_version")
+    fi
+    ;;
+esac
+
+cmake "${cmake_args[@]}"
 
 cmake --build "$build_dir" --target dolphin-tool --parallel "$jobs"
 
-built_binary="$build_dir/Binaries/dolphin-tool"
-[[ -f "$built_binary" ]] || fail "expected dolphin-tool build output at $built_binary"
+# Dolphin's CMake places dolphin-tool in different locations depending on the
+# platform and generator. On Linux/Ninja it is ./Binaries/dolphin-tool; on
+# macOS it may be ./Binaries/dolphin-tool or ./Source/Core/DolphinTool/dolphin-tool.
+# Search the build directory for the first executable named 'dolphin-tool'.
+built_binary=""
+for candidate in \
+  "$build_dir/Binaries/dolphin-tool" \
+  "$build_dir/Source/Core/DolphinTool/dolphin-tool"; do
+  if [[ -f "$candidate" ]]; then
+    built_binary="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$built_binary" ]]; then
+  # Fallback: look anywhere under the build tree for an executable file named
+  # dolphin-tool.
+  while IFS= read -r -d '' candidate; do
+    if [[ -x "$candidate" && -f "$candidate" ]]; then
+      built_binary="$candidate"
+      break
+    fi
+  done < <(find "$build_dir" -name dolphin-tool -print0 2>/dev/null)
+fi
+
+[[ -n "$built_binary" && -f "$built_binary" ]] \
+  || fail "could not locate built dolphin-tool binary under $build_dir"
 
 cp "$built_binary" "$output_path"
 chmod 755 "$output_path"
