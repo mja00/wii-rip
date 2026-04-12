@@ -44,18 +44,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.BANNER_RENDER_PATH }}
-          key: wii-banner-render-${{ env.TOOL_CACHE_PERIOD }}
+          key: wii-banner-render-${{ hashFiles('Source/wii-banner-render/**', 'packaging/build_banner_render.sh') }}
 
       - name: Install Ubuntu build dependencies
         run: |
           sudo apt-get update
+          # libglew-dev is no longer required: the vendored wii-banner-player
+          # tree at Source/wii-banner-render/ ships its own GLEW 2.2.0 and the
+          # foreach() macro now expands to a C++11 range-for, so libboost-dev
+          # is also unnecessary.
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             curl \
             gettext \
             jq \
-            libglew-dev \
             libegl-dev \
             ninja-build \
             patchelf \
@@ -161,6 +164,7 @@ jobs:
       PACKAGE_NAME: wii-rip-macos-arm64
       DOLPHIN_TOOL_PATH: build/dolphin-tool-cache/dolphin-tool
       WIT_PATH: build/wit-cache/wit
+      BANNER_RENDER_PATH: build/wii-banner-render-cache/wii-banner-render
 
     steps:
       - name: Check out repository
@@ -193,14 +197,23 @@ jobs:
           path: ${{ env.WIT_PATH }}
           key: wit-macos-${{ env.TOOL_CACHE_PERIOD }}
 
+      - name: Restore wii-banner-render cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BANNER_RENDER_PATH }}
+          key: wii-banner-render-macos-${{ hashFiles('Source/wii-banner-render/**', 'packaging/build_banner_render.sh') }}
+
       - name: Install macOS build dependencies
         run: |
           if command -v brew >/dev/null 2>&1; then
             brew update
-            # cmake + ninja are required by the dolphin-tool build, gawk is
-            # required by wit's setup.sh (gensub() is a gawk extension; BSD
-            # awk lacks it). Dolphin's USE_SYSTEM_LIBS=OFF bundles its own
-            # Boost via Externals, so no system Boost is required.
+            # cmake + ninja are required by the dolphin-tool and
+            # wii-banner-render builds. gawk is required by wit's setup.sh
+            # (gensub() is a gawk extension; BSD awk lacks it). Dolphin's
+            # USE_SYSTEM_LIBS=OFF bundles its own Boost via Externals.
+            # wii-banner-render vendors GLEW under
+            # Source/wii-banner-render/Externals/glew/ and uses Apple's
+            # OpenGL.framework directly via CGL — no extra packages needed.
             brew install cmake ninja gawk || true
           else
             echo "Homebrew not found on this runner; ensure cmake, ninja, and gawk are available." >&2
@@ -220,6 +233,12 @@ jobs:
             --output "$WIT_PATH" \
             --skip-if-present
 
+      - name: Build wii-banner-render helper
+        run: |
+          ./packaging/build_banner_render.sh \
+            --output "$BANNER_RENDER_PATH" \
+            --skip-if-present
+
       - name: Run linters
         run: cargo clippy --all-targets -- -D warnings
 
@@ -228,15 +247,12 @@ jobs:
 
       - name: Package bundled release
         run: |
-          # wii-banner-render is not built on macOS in this workflow because
-          # its upstream uses EGL headers which do not exist on macOS. The
-          # release bundle omits it — --video / --video-only are not supported
-          # in the macOS bundle.
           ./packaging/build_release.sh \
             --name "$PACKAGE_NAME" \
             --tar \
             --dolphin-tool "$DOLPHIN_TOOL_PATH" \
-            --wit "$WIT_PATH"
+            --wit "$WIT_PATH" \
+            --banner-render "$BANNER_RENDER_PATH"
 
       - name: Show packaged artifact
         run: ls -lh "dist/$PACKAGE_NAME.tar.gz"

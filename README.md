@@ -35,15 +35,22 @@ target/release/wii-rip
 
 ## Building wii-banner-render
 
-`wii-banner-render` is a separate C++ helper built from the
-[wii-banner-player](https://github.com/jordan-woyak/wii-banner-player) source
-with modifications for headless video export. The build script handles cloning
-and patching automatically.
+`wii-banner-render` is a separate C++ helper built from a vendored fork of
+the [wii-banner-player](https://github.com/jordan-woyak/wii-banner-player)
+source. The sources live in-tree at `Source/wii-banner-render/` (no clone or
+download at build time); see `Source/wii-banner-render/NOTICE.md` for upstream
+attribution and the list of in-repo modifications.
 
 **Build dependencies (Ubuntu/Debian):**
 
 ```bash
-sudo apt-get install build-essential cmake ninja-build libglew-dev libegl-dev
+sudo apt-get install build-essential cmake ninja-build libegl-dev
+```
+
+**Build dependencies (macOS):**
+
+```bash
+brew install cmake ninja
 ```
 
 **Build:**
@@ -54,13 +61,24 @@ sudo apt-get install build-essential cmake ninja-build libglew-dev libegl-dev
 ```
 
 **Runtime:** `wii-banner-render` requires `ffmpeg` at runtime for video
-encoding. Mesa's software rasterizer (`libgl1-mesa-dri`) handles headless OpenGL
-on machines without a GPU; this is typically installed by default on Ubuntu.
+encoding (`brew install ffmpeg` on macOS, `apt-get install ffmpeg` on Linux).
+On Linux, Mesa's software rasterizer (`libgl1-mesa-dri`) handles headless
+OpenGL on machines without a GPU; this is typically installed by default on
+Ubuntu. On macOS, the helper uses Apple's `OpenGL.framework` (legacy 2.1
+profile via CGL plus an EXT_framebuffer_object FBO) for headless rendering —
+no GPU server required.
 
-**macOS:** `wii-banner-render` relies on EGL headers/libraries that are
-Linux-only, so it is not built on macOS. The macOS release bundle omits this
-helper; `--video` / `--video-only` are therefore unsupported in that bundle.
-Audio extraction works identically on macOS and Linux.
+**Banner text rendering:** Wii channel banners reference Wii system fonts
+(BRFNT) by name. The Wii system font archive (`00000003.app`) is copyrighted
+and not shipped with this project; without it, the upstream wii-banner-player
+text path produces empty quads. wii-banner-render works around this by
+shipping a vendored copy of [Roboto Regular](https://github.com/googlefonts/roboto)
+(Apache 2.0) and rasterizing ASCII glyphs at startup using
+[stb_truetype.h](https://github.com/nothings/stb), so banner titles render
+out of the box even without a Wii NAND dump on disk. If you do happen to
+have an extracted `00000003.app`, pass its path via
+`--font-archive /path/to/00000003.app` to use the real Wii system fonts
+instead.
 
 ## Building wit
 
@@ -108,7 +126,7 @@ dist/
     tools/
       dolphin-tool
       wit
-      wii-banner-render   (when --banner-render is passed; Linux only)
+      wii-banner-render   (when --banner-render is passed)
 ```
 
 The default package name is derived from `uname -s`/`uname -m`. On Linux it
@@ -135,14 +153,13 @@ Override helper paths if they are not on `PATH`:
 The release workflow lives at `.github/workflows/release.yml` and runs two
 jobs in parallel:
 
-- `ubuntu-release` — runs on `ubuntu-latest`, source-builds `dolphin-tool` and
-  `wii-banner-render`, installs `wit` from the Ubuntu package archive, and
-  produces `dist/wii-rip-linux-x86_64.tar.gz`.
+- `ubuntu-release` — runs on `ubuntu-latest`, source-builds `dolphin-tool`
+  and `wii-banner-render`, installs `wit` from the Ubuntu package archive,
+  and produces `dist/wii-rip-linux-x86_64.tar.gz`.
 - `macos-release` — runs on `macos-latest` (Apple Silicon), source-builds
-  `dolphin-tool` and `wit`, and produces `dist/wii-rip-macos-arm64.tar.gz`.
-  `wii-banner-render` is omitted because its upstream uses EGL which is not
-  available on macOS, so `--video` / `--video-only` are unsupported in the
-  macOS bundle.
+  `dolphin-tool`, `wit`, and `wii-banner-render`, and produces
+  `dist/wii-rip-macos-arm64.tar.gz`. `--video` / `--video-only` are
+  supported on both platforms.
 
 Pull requests and pushes to `main` build and validate both artifacts. Tags
 matching `v*` additionally publish both tarballs to the GitHub Release.
@@ -202,6 +219,12 @@ Render banner animation only, skip audio extraction:
 ./target/release/wii-rip "Game.rvz" -o output/ --video-only
 ```
 
+Pass a Wii shared font archive through to `wii-banner-render`:
+
+```bash
+./target/release/wii-rip "Game.rvz" -o output/ --video-only --font-archive /path/to/00000011.app
+```
+
 Save the intermediate `sound.bin` alongside the WAV if you want to inspect it:
 
 ```bash
@@ -227,11 +250,16 @@ cargo run -- "Game.rvz" -o output/
 
 - Linux and macOS are the supported targets. The Rust binary builds with no
   code changes on both platforms; CI publishes tarballs for
-  `linux-x86_64` and `macos-arm64`.
-- Audio extraction works identically on Linux and macOS. Banner-animation
-  video (`--video` / `--video-only`) is Linux-only in the current bundles
-  because `wii-banner-render` relies on EGL headers that are not available on
-  macOS.
-- `dolphin-tool`, `wit`, and `wii-banner-render` remain external dependencies.
-- Releases that bundle these helpers should include the relevant GPL/zlib license texts and corresponding-source information for the exact bundled binaries.
-- `wii-banner-render` is based on the [wii-banner-player](https://github.com/jordan-woyak/wii-banner-player) project (zlib license) and uses the NW4R layout engine re-implementation from that project.
+  `linux-x86_64` and `macos-arm64`. Audio extraction, banner-animation video
+  (`--video` / `--video-only`), and the muxed audio+video output all work
+  identically on Linux and macOS.
+- `dolphin-tool` and `wit` remain external dependencies that the build
+  scripts source-build from upstream tarballs. `wii-banner-render`, by
+  contrast, is now vendored in-tree at `Source/wii-banner-render/` — see
+  `Source/wii-banner-render/NOTICE.md` for upstream attribution and the list
+  of in-repo modifications.
+- Releases that bundle these helpers should include the relevant GPL/zlib
+  license texts and corresponding-source information for the exact bundled
+  binaries. The vendored `wii-banner-render` sources at
+  `Source/wii-banner-render/` already satisfy the GPL-2.0 corresponding-source
+  obligation for that helper.
