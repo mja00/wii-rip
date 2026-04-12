@@ -17,12 +17,17 @@ distribution.
 */
 
 // NOTE: Altered source version of Layout.h from the wii-banner-player project.
-// Changes: added GetLoopStart() and GetLoopEnd() public getters.
+// Changes:
+//   - Added GetLoopStart() and GetLoopEnd() public getters.
+//   - Added `#include <list>` explicitly.  Upstream relied on
+//     Font.h pulling it in transitively, but Font.h no longer uses
+//     std::list internally so this header now owns its own include.
 
 #ifndef WII_BNR_LAYOUT_H_
 #define WII_BNR_LAYOUT_H_
 #include <cstdint>
 #include <iostream>
+#include <list>
 #include <string>
 #include <map>
 #include "Pane.h"

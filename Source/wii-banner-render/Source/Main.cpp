@@ -22,10 +22,16 @@ distribution.
 */
 
 // NOTE: Altered source version of Main.cpp from the wii-banner-player project.
-// The original was an interactive SFML windowed banner viewer. This version
-// replaces the windowed renderer with a headless EGL offscreen context, steps
-// through the banner animation frame-by-frame, captures each frame via
-// glReadPixels, and pipes raw RGBA frames to ffmpeg for video encoding.
+// The original was an interactive SFML windowed banner viewer. This version:
+//   - Replaces the windowed renderer with a headless OpenGL offscreen
+//     context (EGL pbuffer on Linux, CGL legacy 2.1 + EXT_framebuffer_object
+//     FBO on macOS).
+//   - Steps through the banner animation frame-by-frame, captures each
+//     frame via glReadPixels, and pipes raw RGBA frames to ffmpeg for H.264
+//     encoding.
+//   - Adds CLI flags: --output, --aspect, --fps, --loops, --ffmpeg,
+//     --language, and --font-archive (forwarded to Banner so the user can
+//     point at an extracted Wii system font archive when one is available).
 
 #include <cerrno>
 #include <cstdlib>
@@ -35,7 +41,18 @@ distribution.
 #include <string>
 #include <vector>
 
+#ifdef __APPLE__
+// Apple deprecated desktop OpenGL in 10.14 in favour of Metal, but the legacy
+// 2.1 profile we use here is still functional via Apple's GL-on-Metal driver
+// (and is the only profile that supports the fixed-function pipeline that the
+// upstream wii-banner-player rendering code relies on).  Silence the noisy
+// deprecation warnings produced by every CGL/GL header include.
+#define GL_SILENCE_DEPRECATION
+#include <OpenGL/OpenGL.h>  // CGL
+#else
 #include <EGL/egl.h>
+#endif
+
 #include <GL/glew.h>
 
 #include "Banner.h"
@@ -77,16 +94,131 @@ static RenderProfile get_render_profile(RenderAspect aspect)
 }
 
 // ---------------------------------------------------------------------------
-// EGL headless context
+// Headless OpenGL context
+//
+// Linux: an EGL pbuffer surface backs the default framebuffer.
+// macOS: a CGL context with no drawable plus an FBO + renderbuffers.
+//        Apple Silicon Macs no longer ship EGL, but the legacy 2.1 profile
+//        is still supported by Apple's GL-on-Metal driver, which is enough
+//        for the fixed-function rendering done by wii-banner-player.
 // ---------------------------------------------------------------------------
 
-struct EGLState
+#ifdef __APPLE__
+
+struct GLState
+{
+    CGLContextObj context = nullptr;
+    GLuint fbo = 0;
+    GLuint color_rb = 0;
+    GLuint depth_stencil_rb = 0;
+
+    ~GLState()
+    {
+        if (context)
+        {
+            // Tear down the FBO objects before destroying the context they
+            // belong to.  Each delete is a no-op when the name is 0.
+            if (fbo)
+                glDeleteFramebuffersEXT(1, &fbo);
+            if (color_rb)
+                glDeleteRenderbuffersEXT(1, &color_rb);
+            if (depth_stencil_rb)
+                glDeleteRenderbuffersEXT(1, &depth_stencil_rb);
+
+            CGLSetCurrentContext(nullptr);
+            CGLDestroyContext(context);
+        }
+    }
+};
+
+static bool init_gl_context(GLState& gl)
+{
+    CGLPixelFormatAttribute attribs[] = {
+        kCGLPFAAccelerated,
+        kCGLPFAColorSize,    static_cast<CGLPixelFormatAttribute>(24),
+        kCGLPFAAlphaSize,    static_cast<CGLPixelFormatAttribute>(8),
+        kCGLPFADepthSize,    static_cast<CGLPixelFormatAttribute>(24),
+        kCGLPFAStencilSize,  static_cast<CGLPixelFormatAttribute>(8),
+        kCGLPFAOpenGLProfile,
+            static_cast<CGLPixelFormatAttribute>(kCGLOGLPVersion_Legacy),
+        static_cast<CGLPixelFormatAttribute>(0)
+    };
+
+    CGLPixelFormatObj pix = nullptr;
+    GLint npix = 0;
+    CGLError err = CGLChoosePixelFormat(attribs, &pix, &npix);
+    if (err != kCGLNoError || pix == nullptr)
+    {
+        std::cerr << "wii-banner-render: CGLChoosePixelFormat failed: "
+                  << CGLErrorString(err) << "\n";
+        return false;
+    }
+
+    err = CGLCreateContext(pix, nullptr, &gl.context);
+    CGLDestroyPixelFormat(pix);
+    if (err != kCGLNoError || gl.context == nullptr)
+    {
+        std::cerr << "wii-banner-render: CGLCreateContext failed: "
+                  << CGLErrorString(err) << "\n";
+        return false;
+    }
+
+    err = CGLSetCurrentContext(gl.context);
+    if (err != kCGLNoError)
+    {
+        std::cerr << "wii-banner-render: CGLSetCurrentContext failed: "
+                  << CGLErrorString(err) << "\n";
+        return false;
+    }
+
+    return true;
+}
+
+static bool init_offscreen_fbo(GLState& gl, int width, int height)
+{
+    // Must be called *after* glewInit(), since the EXT_framebuffer_object
+    // entry points (glGenFramebuffersEXT etc.) are loaded by GLEW.
+    glGenFramebuffersEXT(1, &gl.fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, gl.fbo);
+
+    glGenRenderbuffersEXT(1, &gl.color_rb);
+    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, gl.color_rb);
+    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_RGBA8, width, height);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                                 GL_RENDERBUFFER_EXT, gl.color_rb);
+
+    // Packed depth+stencil renderbuffer; the same name is attached to both
+    // the depth and stencil attachment points so glClear with
+    // GL_STENCIL_BUFFER_BIT and the layout renderer's stencil ops both work.
+    glGenRenderbuffersEXT(1, &gl.depth_stencil_rb);
+    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, gl.depth_stencil_rb);
+    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_DEPTH24_STENCIL8_EXT,
+                             width, height);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT,
+                                 GL_RENDERBUFFER_EXT, gl.depth_stencil_rb);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_STENCIL_ATTACHMENT_EXT,
+                                 GL_RENDERBUFFER_EXT, gl.depth_stencil_rb);
+
+    const GLenum status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    if (status != GL_FRAMEBUFFER_COMPLETE_EXT)
+    {
+        std::cerr << "wii-banner-render: offscreen framebuffer is incomplete"
+                     " (status 0x" << std::hex << status << ")\n";
+        return false;
+    }
+
+    return true;
+}
+
+#else  // !__APPLE__
+
+struct GLState
 {
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLSurface surface = EGL_NO_SURFACE;
     EGLContext context = EGL_NO_CONTEXT;
 
-    ~EGLState()
+    ~GLState()
     {
         if (display != EGL_NO_DISPLAY)
         {
@@ -100,7 +232,7 @@ struct EGLState
     }
 };
 
-static bool init_egl(EGLState& egl, int width, int height)
+static bool init_gl_context(GLState& egl, int width, int height)
 {
     egl.display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (egl.display == EGL_NO_DISPLAY)
@@ -173,6 +305,8 @@ static bool init_egl(EGLState& egl, int width, int height)
     return true;
 }
 
+#endif  // __APPLE__
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -183,13 +317,18 @@ static void print_usage(const char* prog)
         << "Usage: " << prog << " <input.bnr> -o <output.mp4> [OPTIONS]\n\n"
         << "Render a Wii disc channel banner animation to a video file.\n\n"
         << "Options:\n"
-        << "  -o, --output <path>   Output video file (required)\n"
-        << "      --aspect <mode>   Banner aspect ratio: 4:3 or 16:9 (default: 4:3)\n"
-        << "      --fps <n>         Frame rate (default: 60)\n"
-        << "      --loops <n>       Number of animation loop cycles (default: 1)\n"
-        << "      --ffmpeg <path>   Path to ffmpeg binary (default: ffmpeg)\n"
-        << "      --language <lang> Banner language code, e.g. ENG, JPN (default: ENG)\n"
-        << "  -h, --help            Show this help\n";
+        << "  -o, --output <path>     Output video file (required)\n"
+        << "      --aspect <mode>     Banner aspect ratio: 4:3 or 16:9 (default: 4:3)\n"
+        << "      --fps <n>           Frame rate (default: 60)\n"
+        << "      --loops <n>         Number of animation loop cycles (default: 1)\n"
+        << "      --ffmpeg <path>     Path to ffmpeg binary (default: ffmpeg)\n"
+        << "      --language <lang>   Banner language code, e.g. ENG, JPN (default: ENG)\n"
+        << "      --font-archive <p>  Optional path to a Wii system font archive\n"
+        << "                          (e.g. an extracted 00000003.app from a Wii NAND).\n"
+        << "                          When omitted, banner text is rendered using the\n"
+        << "                          bundled Roboto Regular TTF instead of the real\n"
+        << "                          Wii system fonts.\n"
+        << "  -h, --help              Show this help\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -200,8 +339,9 @@ int main(int argc, char* argv[])
 {
     std::string input_path;
     std::string output_path;
-    std::string ffmpeg_path = "ffmpeg";
-    std::string language    = "ENG";
+    std::string ffmpeg_path  = "ffmpeg";
+    std::string language     = "ENG";
+    std::string font_archive;  // optional Wii system font archive
     RenderAspect render_aspect = RenderAspect::Standard;
     int fps   = 60;
     int loops = 1;
@@ -253,6 +393,10 @@ int main(int argc, char* argv[])
         {
             language = argv[++i];
         }
+        else if (arg == "--font-archive" && i + 1 < argc)
+        {
+            font_archive = argv[++i];
+        }
         else if (arg == "-h" || arg == "--help")
         {
             print_usage(argv[0]);
@@ -284,16 +428,21 @@ int main(int argc, char* argv[])
     }
 
     // ------------------------------------------------------------------
-    // Initialize EGL offscreen OpenGL context
+    // Initialize the headless OpenGL context (EGL on Linux, CGL on macOS)
     // ------------------------------------------------------------------
 
     const RenderProfile profile = get_render_profile(render_aspect);
 
-    EGLState egl;
-    if (!init_egl(egl, profile.width, profile.height))
+    GLState gl_state;
+#ifdef __APPLE__
+    if (!init_gl_context(gl_state))
         return 1;
+#else
+    if (!init_gl_context(gl_state, profile.width, profile.height))
+        return 1;
+#endif
 
-    // Initialize GLEW against the active EGL context.
+    // Initialize GLEW against the now-current context.
     glewExperimental = GL_TRUE;
     const GLenum glew_err = glewInit();
     if (glew_err != GLEW_OK)
@@ -302,6 +451,13 @@ int main(int argc, char* argv[])
                   << glewGetErrorString(glew_err) << "\n";
         return 1;
     }
+
+#ifdef __APPLE__
+    // CGL contexts have no default drawable; we render into an FBO instead.
+    // glReadPixels then reads from GL_COLOR_ATTACHMENT0 of the bound FBO.
+    if (!init_offscreen_fbo(gl_state, profile.width, profile.height))
+        return 1;
+#endif
 
     // GX_Init sets up the GX-over-OpenGL shim used by the banner renderer.
     GX_Init(nullptr, 0);
@@ -325,7 +481,7 @@ int main(int argc, char* argv[])
     // Load banner
     // ------------------------------------------------------------------
 
-    WiiBanner::Banner banner(input_path);
+    WiiBanner::Banner banner(input_path, font_archive);
     banner.LoadBanner();
 
     WiiBanner::Layout* const layout = banner.GetBanner();

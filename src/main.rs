@@ -25,6 +25,7 @@ struct Args {
     video: bool,
     video_only: bool,
     video_aspect: VideoAspectSelection,
+    font_archive: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +100,7 @@ fn run() -> Result<()> {
         args.video,
         args.video_only,
         args.video_aspect,
+        args.font_archive.as_deref(),
     )
 }
 
@@ -110,6 +112,7 @@ fn parse_args() -> Result<Args> {
     let mut video = false;
     let mut video_only = false;
     let mut video_aspect = VideoAspectSelection::Standard;
+    let mut font_archive = None;
 
     while let Some(argument) = parser.next()? {
         match argument {
@@ -131,6 +134,9 @@ fn parse_args() -> Result<Args> {
                     .to_str()
                     .context("--video-aspect must be valid UTF-8")?;
                 video_aspect = VideoAspectSelection::parse(value)?;
+            }
+            Long("font-archive") => {
+                font_archive = Some(PathBuf::from(parser.value()?));
             }
             Short('h') | Long("help") => {
                 print_help();
@@ -157,12 +163,13 @@ fn parse_args() -> Result<Args> {
         video,
         video_only,
         video_aspect,
+        font_archive,
     })
 }
 
 fn print_help() {
     println!(
-        "wii-rip\n\nExtract Wii disc channel audio and/or banner animation from .rvz, .iso, and .wbfs images.\n\nUSAGE:\n    wii-rip <input> [OPTIONS]\n\nOPTIONS:\n    -o, --output <dir>         Output directory (default: ./output)\n        --keep-temp            Save extracted sound.bin alongside the WAV\n        --video                Also render the banner animation to an MP4\n        --video-only           Render banner animation only; skip audio extraction\n        --video-aspect <mode>  Banner aspect ratio: 4:3, 16:9, or both (default: 4:3)\n    -h, --help                 Show this help text\n\nEXTERNAL TOOLS:\n    dolphin-tool         Required for .rvz input (override: $WII_RIP_DOLPHIN_TOOL)\n    wit                  Required for disc image extraction (override: $WII_RIP_WIT)\n    wii-banner-render    Required for --video / --video-only (override: $WII_RIP_BANNER_RENDER)\n    ffmpeg               Optional; muxes audio + video into a single file (override: $WII_RIP_FFMPEG)\n"
+        "wii-rip\n\nExtract Wii disc channel audio and/or banner animation from .rvz, .iso, and .wbfs images.\n\nUSAGE:\n    wii-rip <input> [OPTIONS]\n\nOPTIONS:\n    -o, --output <dir>         Output directory (default: ./output)\n        --keep-temp            Save extracted sound.bin alongside the WAV\n        --video                Also render the banner animation to an MP4\n        --video-only           Render banner animation only; skip audio extraction\n        --video-aspect <mode>  Banner aspect ratio: 4:3, 16:9, or both (default: 4:3)\n        --font-archive <path>  Optional Wii font archive passed to wii-banner-render\n    -h, --help                 Show this help text\n\nEXTERNAL TOOLS:\n    dolphin-tool         Required for .rvz input (override: $WII_RIP_DOLPHIN_TOOL)\n    wit                  Required for disc image extraction (override: $WII_RIP_WIT)\n    wii-banner-render    Required for --video / --video-only (override: $WII_RIP_BANNER_RENDER)\n    ffmpeg               Optional; muxes audio + video into a single file (override: $WII_RIP_FFMPEG)\n"
     );
 }
 
@@ -173,6 +180,7 @@ fn rip(
     video: bool,
     video_only: bool,
     video_aspect: VideoAspectSelection,
+    font_archive: Option<&Path>,
 ) -> Result<()> {
     let suffix = input_path
         .extension()
@@ -249,7 +257,7 @@ fn rip(
         for aspect in video_aspect.variants() {
             let banner_video_path =
                 output_dir.join(banner_output_name(&stem, *aspect, video_aspect));
-            render_banner(&bnr_path, &banner_video_path, *aspect)?;
+            render_banner(&bnr_path, &banner_video_path, *aspect, font_archive)?;
             banner_paths.push((*aspect, banner_video_path));
         }
         banner_paths
@@ -375,20 +383,34 @@ fn extract_opening_bnr(image_path: &Path, extract_dir: &Path) -> Result<PathBuf>
     Ok(bnr_path)
 }
 
-fn render_banner(bnr_path: &Path, output_path: &Path, aspect: VideoAspect) -> Result<()> {
+fn render_banner(
+    bnr_path: &Path,
+    output_path: &Path,
+    aspect: VideoAspect,
+    font_archive: Option<&Path>,
+) -> Result<()> {
     let renderer = check_tool("wii-banner-render")?;
-    let output = Command::new(&renderer)
-        .args([
-            bnr_path.to_str().context(
-                "opening.bnr path contains non-UTF-8 data unsupported by wii-banner-render invocation",
+    let mut command = Command::new(&renderer);
+    command.args([
+        bnr_path.to_str().context(
+            "opening.bnr path contains non-UTF-8 data unsupported by wii-banner-render invocation",
+        )?,
+        "-o",
+        output_path.to_str().context(
+            "output path contains non-UTF-8 data unsupported by wii-banner-render invocation",
+        )?,
+        "--aspect",
+        aspect.cli_value(),
+    ]);
+    if let Some(font_archive) = font_archive {
+        command.args([
+            "--font-archive",
+            font_archive.to_str().context(
+                "font archive path contains non-UTF-8 data unsupported by wii-banner-render invocation",
             )?,
-            "-o",
-            output_path.to_str().context(
-                "output path contains non-UTF-8 data unsupported by wii-banner-render invocation",
-            )?,
-            "--aspect",
-            aspect.cli_value(),
-        ])
+        ]);
+    }
+    let output = command
         .output()
         .with_context(|| format!("failed to run {}", renderer.display()))?;
 
