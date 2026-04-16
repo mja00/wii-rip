@@ -35,15 +35,18 @@ target/release/wii-rip
 
 ## Building wii-banner-render
 
-`wii-banner-render` is a separate C++ helper built from the
-[wii-banner-player](https://github.com/jordan-woyak/wii-banner-player) source
-with modifications for headless video export. The build script handles cloning
-and patching automatically.
+`wii-banner-render` is a separate C++ helper. Its source is vendored in
+[`Source/wii-banner-render/`](Source/wii-banner-render/), forked from the
+[wii-banner-player](https://github.com/jordan-woyak/wii-banner-player) project
+with modifications for headless video export — see
+[`Source/wii-banner-render/MODIFICATIONS.md`](Source/wii-banner-render/MODIFICATIONS.md)
+for details. The build script downloads GLEW (which must be compiled with
+`GLEW_EGL` for headless OpenGL) into the build directory and runs CMake.
 
 **Build dependencies (Ubuntu/Debian):**
 
 ```bash
-sudo apt-get install build-essential cmake ninja-build libglew-dev libegl-dev
+sudo apt-get install build-essential cmake ninja-build libegl-dev
 ```
 
 **Build:**
@@ -234,4 +237,4 @@ cargo run -- "Game.rvz" -o output/
   macOS.
 - `dolphin-tool`, `wit`, and `wii-banner-render` remain external dependencies.
 - Releases that bundle these helpers should include the relevant GPL/zlib license texts and corresponding-source information for the exact bundled binaries.
-- `wii-banner-render` is based on the [wii-banner-player](https://github.com/jordan-woyak/wii-banner-player) project (zlib license) and uses the NW4R layout engine re-implementation from that project.
+- `wii-banner-render` is a fork of the [wii-banner-player](https://github.com/jordan-woyak/wii-banner-player) project (zlib license), vendored under [`Source/wii-banner-render/`](Source/wii-banner-render/) and modified for headless video export. It uses the NW4R layout engine re-implementation from that project.

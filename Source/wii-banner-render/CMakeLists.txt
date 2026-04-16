@@ -6,12 +6,20 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
 
 include_directories(Externals/dolphin-emu/Source)
 
-# Build GLEW from source with EGL support so glewInit() works without an X
-# display.  The system libGLEW.so is compiled in GLX mode; using it inside a
+# GLEW must be compiled from source with EGL support so glewInit() works without
+# an X display. The system libGLEW.so is built in GLX mode; using it inside a
 # headless EGL context causes glewInit() to fail with "No GLX display".
-# Externals/glew is downloaded by build_banner_render.sh before cmake runs.
-add_library(glew_egl STATIC Externals/glew/src/glew.c)
-target_include_directories(glew_egl PUBLIC Externals/glew/include)
+#
+# GLEW lives outside the source tree (downloaded into the build directory by
+# packaging/build_banner_render.sh) so its location is supplied via cache var.
+set(GLEW_SOURCE_DIR "" CACHE PATH "Path to a GLEW source release (containing src/glew.c)")
+if(NOT GLEW_SOURCE_DIR OR NOT EXISTS "${GLEW_SOURCE_DIR}/src/glew.c")
+    message(FATAL_ERROR "GLEW_SOURCE_DIR must point at a GLEW source release. "
+                        "packaging/build_banner_render.sh handles this automatically.")
+endif()
+
+add_library(glew_egl STATIC "${GLEW_SOURCE_DIR}/src/glew.c")
+target_include_directories(glew_egl PUBLIC "${GLEW_SOURCE_DIR}/include")
 target_compile_definitions(glew_egl PUBLIC GLEW_EGL GLEW_STATIC)
 
 # Find EGL (required for headless offscreen rendering)
